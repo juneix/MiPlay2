@@ -1,6 +1,6 @@
 # MiPlay 隔空妙播
 
-MiPlay（隔空妙播）是小米音箱的隔空播放`桥接器`，专为苹果用户打造，支持独立 AirPlay 1 设备、首发`全屋组播 Beta`、接入 OwnTone 等功能。
+MiPlay（隔空妙播）是小米音箱的隔空播放`桥接器`，专为苹果用户打造，支持独立 AirPlay 1 设备、首发🔥`MiPlay 全屋组播`、接入 `OwnTone` 等功能。
 > 本项目参考并整合了 [MiAir](https://github.com/KiriChen-Wind/MiAir)、[miair-next](https://github.com/deerwan/miair-next)、[miservice-fork](https://pypi.org/project/miservice-fork/)、[AirPlay2-Receiver](https://github.com/openairplay/airplay2-receiver)、[XiaoMusic](https://github.com/hanxi/xiaomusic) 等项目的思路与部分实现，面向自用场景进行了大量重构。
 
 ![miplay-1.webp](./img/miplay-1.webp)
@@ -35,24 +35,24 @@ MiPlay（隔空妙播）是小米音箱的隔空播放`桥接器`，专为苹果
 - 小米小爱音箱自带 DLNA 功能不完整，第三方 DLNA 需额外适配，体验依然不完美
 - 如果需要第三方 DLNA 功能，推荐使用 MiAir、miair-next 等项目
 
-## 🔄 业务工作流程
+## 🔄 工作流程图
 
 ```mermaid
 flowchart TD
-    subgraph Side ["☁️ 旁路服务"]
+    subgraph Side ["☁️ 云服务"]
         direction LR
-        Cloud["☁️ 小米云端 API (登录鉴权)"] --> Notify["📲 通知推送 (Server酱 / Bark)"]
+        Cloud["☁️ 小米云端 API<br/>(登录鉴权)"] --> Notify["📲 通知推送<br/> (Server酱 / Bark)"]
     end
 
-    subgraph LAN ["🌐 局域网通道"]
+    subgraph LAN ["🌐 局域网"]
         direction TD
         A["📱 iPhone / Mac 发射端<br/>(ALAC / AAC / PCM)"] --> B["📡 MiPlay 服务器 (AirPlay 桥接)<br/>• 无损直通: PCM / WAV<br/>• 动态转码: AAC / MP3"]
         B --> C{"播放模式"}
         
-        C -->|独立单播| D["📢 独立 AirPlay 音箱"]
-        C -->|全屋组播| E
+        C -->|单播| D["📢 独立 AirPlay 音箱"]
+        C -->|组播| E
         
-        subgraph E ["🏠 同步播放 (Beta)"]
+        subgraph E ["🏠 全屋播放"]
             direction LR
             E1["📢 音箱 1"] --- E2["📢 音箱 2"] --- E3["📢 音箱 N..."]
         end
@@ -61,7 +61,7 @@ flowchart TD
     Side -.- LAN
 ```
 
-🔐 **小米账号鉴权说明**：
+### 🔐 **小米账号鉴权说明**：
 1. **登录方式区别？**
   - **米家 App 扫码登录 (推荐)**：  
     官方渠道获取长效凭证 `passToken`，支持长期无感自动续期。
@@ -83,6 +83,20 @@ flowchart TD
 | **无损直通 (默认)** | **WAV / PCM 局域网 HTTP 流** | 零二次压缩开销，CPU 占用极低，无损高品质输出 |
 | **动态转码 (兼容)** | **AAC / MP3** | 针对特定曲库 API 音箱动态封装，保证最高兼容性 |
 
+### 🔊 音量说明
+
+苹果（分贝）VS 小米音箱（百分比）对照参考表
+
+| 苹果音量 | 滑块位置 | 小米音量 | 说明 |
+| :--- | :--- | :--- | :--- |
+| **`0.0 dB`** | 100%| **100** | 最大音量 |
+| `-5.0 dB` | 约 85% | **83** | |
+| `-10.0 dB` | 约 70% | **66** | |
+| `-15.0 dB` | 约 50% | **50** | |
+| **`-20.0 dB`** | **约 30%** | **33** | 默认安全音量 |
+| `-25.0 dB` | 约 15% | **16** | 原版代码音量 |
+| **`-30.0 dB`** | 约 1% | **0** | 最小音量 |
+| `-144.0 dB` | 0% | **0** | 静音状态 |
 
 ## 🚀 部署方式
 
@@ -144,22 +158,6 @@ cd MiPlay2
 # 启动
 uv run miplay.py
 ```
-
-
-## 🔊 音量说明
-
-苹果（分贝）VS 小米音箱（百分比）对照参考表
-
-| 苹果音量 | 滑块位置 | 小米音量 | 说明 |
-| :--- | :--- | :--- | :--- |
-| **`0.0 dB`** | 100%| **100** | 最大音量 |
-| `-5.0 dB` | 约 85% | **83** | |
-| `-10.0 dB` | 约 70% | **66** | |
-| `-15.0 dB` | 约 50% | **50** | |
-| **`-20.0 dB`** | **约 30%** | **33** | 默认安全音量 |
-| `-25.0 dB` | 约 15% | **16** | 原版代码音量 |
-| **`-30.0 dB`** | 约 1% | **0** | 最小音量 |
-| `-144.0 dB` | 0% | **0** | 静音状态 |
 
 ## ❤️ 支持项目
 
