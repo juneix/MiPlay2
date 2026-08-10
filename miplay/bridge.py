@@ -177,7 +177,7 @@ class AirPlayBridge:
         }
 
 
-class AirPlayBridgeManager:
+class BridgeManager:
     def __init__(self, host: str, config: Config):
         self.host = host
         self.config = config
@@ -229,3 +229,5 @@ class AirPlayBridgeManager:
         if self.group_bridge:
             res.append(self.group_bridge.snapshot())
         return res
+
+AirPlayBridgeManager = BridgeManager

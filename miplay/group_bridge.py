@@ -26,7 +26,7 @@ log = logging.getLogger("miplay")
 # <!-- Section: Group AirPlay Controller & Bridge -->
 
 
-class GroupXiaomiTargetController:
+class GroupController:
     """组目标控制器：使用 asyncio.gather 向全屋组成员并发广播控制指令。"""
 
     def __init__(self, config: Config, controllers_provider: callable):
@@ -97,13 +97,13 @@ class GroupXiaomiTargetController:
             return {"status": 0, "volume": 50, "cur_time": 0, "duration": 0}
 
 
-class GroupAirPlayBridge:
+class GroupBridge:
     """全屋虚拟 AirPlay 桥接器，连接全屋组控制器与独立 AirPlayServer。"""
 
     def __init__(
         self,
         host: str,
-        group_controller: GroupXiaomiTargetController,
+        group_controller: GroupController,
         shared_zeroconf: Zeroconf | None = None,
         config: Config | None = None,
     ):

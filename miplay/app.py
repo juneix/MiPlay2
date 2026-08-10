@@ -19,12 +19,12 @@ import time
 
 from aiohttp import web
 
-from miplay.bridge import AirPlayBridgeManager
+from miplay.bridge import BridgeManager
 from miplay.config import Config, build_external_status, detect_name_conflicts
 from miplay.logger import ColoredFormatter, PlainTextFormatter, RateLimitFilter
 from miplay.version import __version__, check_for_updates
 from miplay.web.api import create_web_app
-from miplay.xiaomi import XiaomiAuthManager, XiaomiTargetManager
+from miplay.xiaomi import AuthManager, TargetManager
 
 log = logging.getLogger("miplay")
 
@@ -33,9 +33,9 @@ log = logging.getLogger("miplay")
 class MiPlay:
     def __init__(self, config: Config):
         self.config = config
-        self.auth = XiaomiAuthManager(config)
-        self.target_manager = XiaomiTargetManager(config, self.auth)
-        self.bridge_manager: AirPlayBridgeManager | None = None
+        self.auth = AuthManager(config)
+        self.target_manager = TargetManager(config, self.auth)
+        self.bridge_manager: BridgeManager | None = None
         self._web_runner: web.AppRunner | None = None
         self.running = False
         self.status_message = ""
@@ -81,7 +81,7 @@ class MiPlay:
                 self.status_message = "No Xiaomi targets are ready; sync devices and verify credentials."
                 log.warning(self.status_message)
                 return
-            self.bridge_manager = AirPlayBridgeManager(self.config.host, self.config)
+            self.bridge_manager = BridgeManager(self.config.host, self.config)
             await self.bridge_manager.start_for_targets(self.target_manager.controllers)
             self.running = True
             self.status_message = f"MiPlay running with {len(self.target_manager.controllers)} Xiaomi AirPlay target(s)."

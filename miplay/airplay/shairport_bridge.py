@@ -25,7 +25,70 @@ log = logging.getLogger("miplay")
 _PIPE_CHUNK_SIZE = 1408
 
 
-class ShairportPipeBridge:
+def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf"):
+    """检测宿主机 Shairport-Sync 配置文件，若为 alsa 模式则备份并修补为 Pipe 模式。"""
+    if not os.path.exists(config_path):
+        return
+
+    try:
+        with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        # 检查是否已配置为 pipe 模式
+        if 'output_backend = "pipe";' in content or 'output_backend = "pipe"' in content:
+            log.info("[AirPlay] 读取到已配置的 Shairport-Sync 管道配置文件 (%s)", config_path)
+            return
+
+        log.warning("[AirPlay] 检测到宿主机配置 (%s) 为 alsa 模式，正在自动备份并修补为 Pipe 管道模式...", config_path)
+
+        bak_path = config_path + ".bak"
+        if not os.path.exists(bak_path):
+            import shutil
+            shutil.copy2(config_path, bak_path)
+            log.info("[AirPlay] 已备份原配置文件至 %s", bak_path)
+
+        pipe_conf = (
+            "// MiPlay 原生对接专用 Shairport-Sync 配置文件\n"
+            "general = {\n"
+            '    name = "MiPlay 全屋播放";\n'
+            '    output_backend = "pipe";\n'
+            "};\n\n"
+            "pipe = {\n"
+            '    name = "/tmp/shairport/audio.fifo";\n'
+            "};\n\n"
+            "metadata = {\n"
+            '    enabled = "yes";\n'
+            '    include_cover_art = "no";\n'
+            '    pipe_name = "/tmp/shairport/metadata.fifo";\n'
+            "};\n"
+        )
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(pipe_conf)
+
+        # 尝试重启宿主机 shairport-sync 服务 (兼容 Linux systemctl 与 macOS brew services)
+        import subprocess
+        import sys
+
+        res = None
+        if sys.platform == "darwin":
+            res = subprocess.run(["brew", "services", "restart", "shairport-sync"], capture_output=True, check=False)
+        else:
+            res = subprocess.run(["systemctl", "restart", "shairport-sync"], capture_output=True, check=False)
+
+        if res and res.returncode == 0:
+            log.info("[AirPlay] 成功重启宿主机 shairport-sync 服务")
+        else:
+            log.info("[AirPlay] 配置文件已更新，请手动重启 shairport-sync 服务生效 (如 sudo systemctl restart shairport-sync)")
+
+    except PermissionError:
+        log.warning("[AirPlay] 发现 %s 尚未配置为 Pipe 模式，但当前缺乏写权限。", config_path)
+        log.warning("[AirPlay] 请在终端运行: sudo sh -c 'cp %s %s.bak && miplay --dev'", config_path, config_path)
+    except Exception as exc:
+        log.debug("[AirPlay] 检测/修补配置文件 %s 时忽略异常: %s", config_path, exc)
+
+
+class ShairportBridge:
     """Shairport-Sync 管道桥接器。
     
     高效读取 /tmp/shairport/audio.fifo 的 PCM 裸流数据，
@@ -48,9 +111,10 @@ class ShairportPipeBridge:
 
     async def start(self):
         """启动管道异步读取监听循环。"""
+        _ensure_shairport_conf()
         self._running = True
         self._task = asyncio.create_task(self._read_loop())
-        log.info("Started ShairportPipeBridge on pipe %s", self.pipe_path)
+        log.info("Started ShairportBridge on pipe %s", self.pipe_path)
 
     async def stop(self):
         """停止管道监听。"""
@@ -62,7 +126,7 @@ class ShairportPipeBridge:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        log.info("Stopped ShairportPipeBridge")
+        log.info("Stopped ShairportBridge")
 
     async def _read_loop(self):
         """异步轮询 Pipe 管道内容，并推送至 HTTP 音频流处理服务器。"""

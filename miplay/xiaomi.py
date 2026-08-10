@@ -55,7 +55,7 @@ class DeviceListError(RuntimeError):
     """Raised when Xiaomi device discovery fails."""
 
 
-class XiaomiAuthManager:
+class AuthManager:
     def __init__(self, config: Config):
         self.config = config
         self.session: aiohttp.ClientSession | None = None
@@ -303,8 +303,8 @@ class XiaomiAuthManager:
         self._cookie_loaded = False
 
 
-class XiaomiTargetController:
-    def __init__(self, target: TargetConfig, auth: XiaomiAuthManager):
+class TargetController:
+    def __init__(self, target: TargetConfig, auth: AuthManager):
         self.target = target
         self.auth = auth
         self._last_volume = 50
@@ -413,11 +413,11 @@ class XiaomiTargetController:
             raise RuntimeError(f"get_status failed for {self.target.airplay_name}: {exc}") from exc
 
 
-class XiaomiTargetManager:
-    def __init__(self, config: Config, auth: XiaomiAuthManager):
+class TargetManager:
+    def __init__(self, config: Config, auth: AuthManager):
         self.config = config
         self.auth = auth
-        self.controllers: dict[str, XiaomiTargetController] = {}
+        self.controllers: dict[str, TargetController] = {}
 
     async def init_targets(self) -> set[str]:
         synced_dids = await self.auth.update_targets_info()
@@ -430,6 +430,12 @@ class XiaomiTargetManager:
                 log.warning("Skipping target did=%s because device_id is missing", target.did)
                 continue
             target.ensure_names()
-            self.controllers[target.id] = XiaomiTargetController(target, self.auth)
+            self.controllers[target.id] = TargetController(target, self.auth)
             log.info("Initialized Xiaomi target: %s (did=%s, enabled=%s)", target.airplay_name, target.did, target.enabled)
         return synced_dids
+
+
+# 别名绑定向后兼容
+XiaomiAuthManager = AuthManager
+XiaomiTargetController = TargetController
+XiaomiTargetManager = TargetManager
