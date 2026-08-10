@@ -48,15 +48,18 @@ def update_shairport_conf_name(new_name: str, template_path: str = "shairport-sy
 _shairport_proc: subprocess.Popen | None = None
 
 
-def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expected_name: str = ""):
-    """检测宿主机 Shairport-Sync 配置文件，比对根目录模板内容，并全自动托管保障 Shairport 进程后台运行。"""
-    global _shairport_proc
+def _prepare_shairport_env(config_path: str = "/etc/shairport-sync.conf", expected_name: str = "") -> str:
+    """创建管道目录/FIFO文件，同步配置文件。返回最终使用的 conf 路径。"""
     os.makedirs("/tmp/shairport", exist_ok=True)
+
+    # 预建 FIFO 特殊文件（shairport-sync 写端 open 前读端必须已存在）
+    for fifo in ("/tmp/shairport/audio.fifo", "/tmp/shairport/metadata.fifo"):
+        if not os.path.exists(fifo):
+            os.mkfifo(fifo)
 
     if expected_name:
         update_shairport_conf_name(expected_name)
 
-    # 优先读取项目根目录下的 shairport-sync.conf 模板文件
     example_path = os.path.join(os.getcwd(), "shairport-sync.conf")
     expected_conf = ""
     if os.path.exists(example_path):
@@ -88,7 +91,6 @@ def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expect
         try:
             with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
                 current_content = f.read()
-
             if current_content.strip() != expected_conf.strip():
                 log.warning("[AirPlay] 检测到宿主机配置 (%s) 与期望配置不匹配，正在自动覆盖与同步...", config_path)
                 bak_path = config_path + ".bak"
@@ -96,7 +98,6 @@ def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expect
                     import shutil
                     shutil.copy2(config_path, bak_path)
                     log.info("[AirPlay] 已备份原配置文件至 %s", bak_path)
-
                 with open(config_path, "w", encoding="utf-8") as f:
                     f.write(expected_conf)
                 log.info("[AirPlay] 成功同步更新 %s 的配置文件", config_path)
@@ -105,34 +106,32 @@ def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expect
         except Exception as exc:
             log.debug("[AirPlay] 检测/修补配置文件 %s 时忽略异常: %s", config_path, exc)
 
-    # 尝试系统服务启动 (Linux systemctl / macOS brew services)
+    return config_path if os.path.exists(config_path) else example_path
+
+
+def _start_shairport_proc(conf_path: str) -> None:
+    """清理残留进程后用 Popen 拉起 shairport-sync，要求调用前读端 FIFO 已打开。"""
+    global _shairport_proc
     import subprocess
-    import sys
 
-    is_mac = sys.platform == "darwin"
-    cmd = ["brew", "services", "restart", "shairport-sync"] if is_mac else ["systemctl", "restart", "shairport-sync"]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-    if res.returncode == 0:
-        log.info("[AirPlay] 成功通过系统服务启动 Shairport-Sync")
+    if _shairport_proc and _shairport_proc.poll() is None:
+        log.info("[AirPlay] Shairport-Sync 已由 Python 托管运行 (PID: %d)", _shairport_proc.pid)
         return
-
-    # 若系统服务启动失败，采用 Popen 自动托管直接拉起后台进程
     try:
-        if _shairport_proc and _shairport_proc.poll() is None:
-            return  # 已经由 Python 托管拉起且正常运行中
-
-        # 先清理残留的死锁进程
         subprocess.run(["pkill", "-9", "shairport-sync"], capture_output=True, check=False)
-        conf_to_use = config_path if os.path.exists(config_path) else example_path
         _shairport_proc = subprocess.Popen(
-            ["shairport-sync", "-c", conf_to_use],
+            ["shairport-sync", "-c", conf_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         log.info("[AirPlay] 成功自动托管拉起 Shairport-Sync 后台进程 (PID: %d)", _shairport_proc.pid)
     except Exception as exc:
         log.error("[AirPlay] 自动托管拉起 Shairport-Sync 进程失败: %s", exc)
+
+
+# 保持向后兼容（app.py 调用入口）
+def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expected_name: str = "") -> None:
+    _prepare_shairport_env(config_path, expected_name)
 
 
 class ShairportBridge:
@@ -162,11 +161,19 @@ class ShairportBridge:
         self._meta_task: asyncio.Task | None = None
 
     async def start(self):
-        """启动管道异步读取监听循环。"""
-        _ensure_shairport_conf()
+        """启动管道异步读取监听循环。
+
+        正确时序：先打开 FIFO 读端 fd → 再拉起 shairport-sync 写端进程。
+        shairport-sync 的 O_WRONLY open 会阻塞等待读端，因此读端必须先就绪。
+        """
+        conf_path = _prepare_shairport_env()  # 建目录 / mkfifo / 同步配置
         self._running = True
         self._task = asyncio.create_task(self._read_loop())
         self._meta_task = asyncio.create_task(self._read_meta_loop())
+        # 让事件循环跑一轮，_read_loop 用 O_RDONLY|O_NONBLOCK 把读端 fd 打开
+        await asyncio.sleep(0.05)
+        # 读端已就绪，现在拉起 shairport-sync（写端 open 不再阻塞）
+        _start_shairport_proc(conf_path)
         log.info("Started ShairportBridge on pipe %s", self.pipe_path)
 
     async def stop(self):
