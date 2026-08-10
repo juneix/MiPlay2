@@ -212,7 +212,7 @@ class BridgeManager:
                 from miplay.airplay.shairport_bridge import ShairportBridge
 
                 loop = asyncio.get_running_loop()
-                stream_server = AudioStreamServer(self.host, speaker_hardware="GROUP")
+                stream_server = AudioStreamServer(self.host)
                 await stream_server.start()
 
                 self.shairport_bridge = ShairportBridge(
