@@ -34,14 +34,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # 从 builder 阶段复制 Python 依赖
 COPY --from=builder /app/deps /app/deps
 
-# 复制项目源码
+# 复制项目源码与配置文件模板
 COPY miplay/ ./miplay/
 COPY miplay.py ./
+COPY shairport-sync.conf ./
 
 # 创建配置与管道目录
 RUN mkdir -p /app/conf /tmp/shairport
 
 EXPOSE 8820 53540-53550 7000 5000
 
-# 容器启动引擎脚本：后台拉起 nqptp 与 shairport-sync 推流至管道，随后启动 MiPlay
-CMD ["sh", "-c", "nqptp & shairport-sync -a 'MiPlay 全屋播放' --output=pipe -- /tmp/shairport/audio.fifo & python miplay.py"]
+# 容器启动脚本：后台拉起 nqptp 与 shairport-sync (由 Python 自动同步/etc/shairport-sync.conf)，随后启动 MiPlay
+CMD ["sh", "-c", "nqptp & shairport-sync & python miplay.py"]

@@ -54,6 +54,10 @@ class MiPlay:
         )
 
     async def start(self):
+        if os.environ.get("MIPLAY_AIRPLAY2_DEV") == "1":
+            from miplay.airplay.shairport_bridge import _ensure_shairport_conf
+            _ensure_shairport_conf(expected_name=self.config.group.airplay_name)
+
         self._setup_logging()
         self._refresh_warnings()
         web_app = create_web_app(self.config, self)
