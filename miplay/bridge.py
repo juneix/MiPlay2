@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from typing import Any
 
 from zeroconf import IPVersion, Zeroconf
 
 from miplay.airplay.server import AirPlayServer
 from miplay.config import Config
-from miplay.xiaomi import XiaomiTargetController
+from miplay.xiaomi import TargetController
 
 log = logging.getLogger("miplay")
 
@@ -28,7 +30,7 @@ class AirPlayBridge:
     def __init__(
         self,
         host: str,
-        controller: XiaomiTargetController,
+        controller: TargetController,
         shared_zeroconf: Zeroconf | None = None,
         config: Config | None = None,
     ):
@@ -86,9 +88,7 @@ class AirPlayBridge:
         elif vol_db >= 0:
             volume = 100
         else:
-            # 调试：改小 30（如 25）低音量更大；改大 30（如 40）低音量更小。
-            db_range = 30 
-            
+            db_range = 30
             volume = int((vol_db + db_range) / db_range * 100)
             
             if volume < 0:
@@ -108,7 +108,7 @@ class AirPlayBridge:
         log.info("--> Incoming AirPlay stream request for %s (RTSP stream: %s)", self.device_name, stream_url)
         if await self.controller.play_url(stream_url):
             self._start_poll()
-            log.info("AirPlay stream successfully attached to Xiaomi target %s", self.device_name)
+            log.info("AirPlay stream attached to %s", self.device_name)
         else:
             log.warning("Xiaomi target rejected AirPlay stream for %s", self.device_name)
 
@@ -182,10 +182,11 @@ class BridgeManager:
         self.host = host
         self.config = config
         self.bridges: dict[str, AirPlayBridge] = {}
-        self.group_bridge: GroupAirPlayBridge | None = None
+        self.group_bridge: Any | None = None
+        self.shairport_bridge: Any | None = None
         self._shared_zeroconf: Zeroconf | None = None
 
-    async def start_for_targets(self, controllers: dict[str, XiaomiTargetController]):
+    async def start_for_targets(self, controllers: dict[str, TargetController]):
         if self._shared_zeroconf is None:
             self._shared_zeroconf = Zeroconf(ip_version=IPVersion.All)
         for target_id, controller in controllers.items():
@@ -198,15 +199,43 @@ class BridgeManager:
             self.bridges[target_id] = bridge
         log.info("Started %s independent AirPlay bridge endpoint(s)", len(self.bridges))
 
-        # 启动全屋虚拟 AirPlay 设备（默认自动开启，无需显式开关）
+        # 普通模式与 Dev 模式严格隔离：
+        is_dev = os.environ.get("MIPLAY_AIRPLAY2_DEV") == "1"
         if controllers:
-            from miplay.group_bridge import GroupBridge, GroupController
+            from miplay.group_bridge import GroupController
             group_controller = GroupController(self.config, lambda: controllers)
-            self.group_bridge = GroupBridge(self.host, group_controller, self._shared_zeroconf, self.config)
-            await self.group_bridge.start()
-            log.info("Started Group AirPlay bridge endpoint: %s", self.config.group.airplay_name)
+
+            if is_dev:
+                # Dev 模式 (AirPlay 2)：由 Shairport-Sync 独占广播 "MiPlay 全屋播放"
+                # 禁用/隐藏 Python AirPlay 1 的 GroupBridge 避免广播重叠冲突
+                from miplay.airplay.shairport_bridge import ShairportBridge
+                loop = asyncio.get_running_loop()
+                self.shairport_bridge = ShairportBridge(
+                    stream_server=group_controller.stream_server,
+                    on_play_start=lambda: asyncio.run_coroutine_threadsafe(
+                        group_controller.play_url(group_controller.stream_server.stream_url), loop
+                    ),
+                    on_play_stop=lambda: asyncio.run_coroutine_threadsafe(
+                        group_controller.stop(), loop
+                    ),
+                )
+                await self.shairport_bridge.start()
+                log.info("Started Shairport-Sync AirPlay 2 Group Pipe Bridge (AirPlay 1 Group Bridge Disabled)")
+            else:
+                # 普通模式 (AirPlay 1)：正常启动 GroupBridge 在 53542 端口广播
+                from miplay.group_bridge import GroupBridge
+                self.group_bridge = GroupBridge(self.host, group_controller, self._shared_zeroconf, self.config)
+                await self.group_bridge.start()
+                log.info("Started Group AirPlay bridge endpoint: %s", self.config.group.airplay_name)
 
     async def stop(self):
+        if self.shairport_bridge:
+            try:
+                await self.shairport_bridge.stop()
+            except Exception as exc:
+                log.error(f"Failed to stop shairport bridge: {exc}")
+            self.shairport_bridge = None
+
         if self.group_bridge:
             try:
                 await self.group_bridge.stop()
@@ -228,6 +257,22 @@ class BridgeManager:
         res = [bridge.snapshot() for bridge in self.bridges.values()]
         if self.group_bridge:
             res.append(self.group_bridge.snapshot())
+        elif self.shairport_bridge:
+            group_snap = {
+                "id": "group",
+                "did": "group",
+                "name": "全屋虚拟音箱",
+                "airplay_name": self.config.group.airplay_name,
+                "hardware": "GROUP",
+                "active": bool(self.shairport_bridge._running),
+                "client_name": "Shairport-Sync AirPlay 2",
+                "metadata": self.shairport_bridge.metadata,
+                "artwork": self.shairport_bridge.artwork,
+                "rtsp_port": 0,
+                "stream_url": self.shairport_bridge.stream_server.stream_url if self.shairport_bridge.stream_server else "",
+                "use_music_api": False,
+            }
+            res.append(group_snap)
         return res
 
 AirPlayBridgeManager = BridgeManager
