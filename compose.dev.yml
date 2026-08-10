@@ -1,0 +1,16 @@
+services:
+  miplay-dev:
+    image: ghcr.io/juneix/miplay2:dev
+    # image: docker.1ms.run/juneix/miplay2:dev  # 毫秒镜像加速
+    container_name: miplay-dev
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      WEB_PORT: 8820
+    volumes:
+      - ./conf:/app/conf
+    devices:
+      - /dev/snd:/dev/snd # 映射物理声卡设备 (提高 ALSA 兼容性)
+    cap_add:
+      - SYS_NICE  # 允许 NQPTP / Shairport-Sync 设置高优先级硬实时 PTP 时钟线程
+      - NET_ADMIN # 允许 NQPTP 绑定与接收 PTP 网络时间包

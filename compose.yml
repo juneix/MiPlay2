@@ -1,7 +1,7 @@
 services:
   miplay:
-    image: ghcr.io/juneix/miplay2
-    # image: docker.1ms.run/juneix/miplay2  # 毫秒镜像加速
+    image: ghcr.io/juneix/miplay2:latest
+    # image: docker.1ms.run/juneix/miplay2:latest  # 毫秒镜像加速
     container_name: miplay
     network_mode: host
     restart: unless-stopped
@@ -9,13 +9,3 @@ services:
       WEB_PORT: 8820
     volumes:
       - ./conf:/app/conf
-# 如需搭配 Shairport-Sync 使用，请取消注释
-#  shairport-sync:
-#    image: mikebrady/shairport-sync
-#    container_name: airplay2
-#    network_mode: host
-#    restart: always
-#    devices:
-#      - /dev/snd:/dev/snd
-#    cap_add:
-#      - SYS_NICE

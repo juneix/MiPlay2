@@ -9,7 +9,7 @@ import aiohttp
 
 log = logging.getLogger("miplay")
 
-__version__ = "v0.2.0"
+__version__ = "v1.0"
 
 # 3 个 GitHub Release API 检查渠道 (包含官方与代理加速)
 CHECK_CHANNELS = [

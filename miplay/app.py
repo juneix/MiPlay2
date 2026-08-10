@@ -22,7 +22,7 @@ from aiohttp import web
 from miplay.bridge import AirPlayBridgeManager
 from miplay.config import Config, build_external_status, detect_name_conflicts
 from miplay.logger import ColoredFormatter, PlainTextFormatter, RateLimitFilter
-from miplay.version import check_for_updates
+from miplay.version import __version__, check_for_updates
 from miplay.web.api import create_web_app
 from miplay.xiaomi import XiaomiAuthManager, XiaomiTargetManager
 
@@ -146,7 +146,7 @@ class MiPlay:
     def get_status_snapshot(self) -> dict:
         external = build_external_status(self.config)
         return {
-            "version": "0.2.0",
+            "version": __version__,
             "running": self.running,
             "host": self.config.host,
             "web_port": self.config.web_port,

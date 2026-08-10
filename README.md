@@ -102,28 +102,37 @@ flowchart TD
 
 ### 1、Docker Compose（推荐）
 
-```
+* **部署纯净基础版 (默认)**：使用根目录下的 `compose.yml` (执行 `docker compose up -d`)
+```yaml
 services:
   miplay:
-    image: ghcr.io/juneix/miplay2
-    # image: docker.1ms.run/juneix/miplay2  # 毫秒镜像加速
+    image: ghcr.io/juneix/miplay2:latest
     container_name: miplay
     network_mode: host
     restart: unless-stopped
     environment:
-      WEB_PORT: 8820 #访问端口
+      WEB_PORT: 8820
     volumes:
       - ./conf:/app/conf
-# 如需搭配 Shairport-Sync 使用，请取消注释
-#  shairport-sync:
-#    image: mikebrady/shairport-sync
-#    container_name: airplay2
-#    network_mode: host
-#    restart: always
-#    devices:
-#      - /dev/snd:/dev/snd
-#    cap_add:
-#      - SYS_NICE
+```
+
+* **部署 AirPlay 2 增强版**：使用根目录下的 `compose.dev.yml` (执行 `docker compose -f compose.dev.yml up -d`)
+```yaml
+services:
+  miplay-dev:
+    image: ghcr.io/juneix/miplay2:dev
+    container_name: miplay-dev
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      WEB_PORT: 8820
+    volumes:
+      - ./conf:/app/conf
+    devices:
+      - /dev/snd:/dev/snd
+    cap_add:
+      - SYS_NICE
+      - NET_ADMIN
 ```
 
 ### 2、Docker CLI

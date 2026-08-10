@@ -1595,24 +1595,22 @@
             </div>
             <div class="modal-title-group">
               <div style="display:flex; align-items:center; gap:8px;">
-                <h3>隔空播放</h3>
+                <h3>隔空妙播</h3>
                 <span
-                  style="padding:2px 6px; background:var(--accent-soft); color:var(--accent); font-size:10px; font-weight:800; border-radius:6px; border:1px solid rgba(219,95,40,0.3);">v6.2</span>
+                  id="appVersionBadge"
+                  style="padding:2px 6px; background:var(--accent-soft); color:var(--accent); font-size:10px; font-weight:800; border-radius:6px; border:1px solid rgba(219,95,40,0.3);">v1.0</span>
               </div>
               <p>让音乐荡漾在每个房间</p>
             </div>
           </div>
 
           <div class="modal-intro">
-            👋 Hi～我是 <a href="https://juneix.github.io" target="_blank">@谢週五</a>。隔空播放（AirPlay）现已入驻飞牛
-            fnOS，了解如何使用音频投送功能，请移步
-            <a href="https://www.apple.com.cn/airplay/" target="_blank">苹果官网</a> 及 <a
-              href="https://support.apple.com/zh-cn/105068" target="_blank">支持文档</a>。
+            👋 Hi～我是 <a href="https://juneix.github.io" target="_blank">@谢週五</a>。MiPlay（隔空妙播）是小米音箱的隔空播放桥接器，支持独立 AirPlay 1 设备、首发🔥MiPlay 全屋组播、接入 OwnTone 等功能。更多详情请访问 <a href="https://5nav.eu.org" target="_blank">📚 藏经阁</a>。
           </div>
 
           <div class="modal-alert">
             <i data-lucide="shield-alert" style="width:14px;"></i>
-            <span>本应用与苹果公司无关，严禁用于商业目的。</span>
+            <span>本应用与苹果和小米公司无关，严禁用于商业目的。</span>
           </div>
 
           <div class="modal-section-title">🚀 交流与支持</div>
@@ -1622,13 +1620,13 @@
             <a href="https://space.bilibili.com/765334" target="_blank" class="modal-btn bilibili">
               <img src="static/bilibili.svg" style="width:14px; height:14px;" alt="B站"> B 站 · 教程
             </a>
-            <a href="https://xhslink.com/m/XSWtx7YRfI" target="_blank" class="modal-btn xhs">
+            <a href="https://xhslink.com/m/5VlySUxNqO5" target="_blank" class="modal-btn xhs">
               <img src="static/xiaohongshu.svg" style="width:14px; height:14px;" alt="小红书"> 小红书 · 攻略
             </a>
             <a href="https://qm.qq.com/q/KhRMpYLnGi" target="_blank" class="modal-btn qq">
               <img src="static/qq.svg" style="width:14px; height:14px;" alt="QQ"> QQ 群 · 催更
             </a>
-            <a href="https://github.com/juneix/MiPlay" target="_blank" class="modal-btn github">
+            <a href="https://github.com/juneix/MiPlay2" target="_blank" class="modal-btn github">
               <img src="static/github.svg" style="width:14px; height:14px;" alt="GitHub"> GitHub · 开源
             </a>
           </div>
@@ -1984,6 +1982,12 @@
         } else {
           panelBadge.style.display = "none";
         }
+      }
+
+      const appVersionBadge = document.getElementById("appVersionBadge");
+      if (appVersionBadge && status.version) {
+        const v = String(status.version).trim();
+        appVersionBadge.textContent = (v.startsWith('v') || v.startsWith('V')) ? v : `v${v}`;
       }
     }
 
