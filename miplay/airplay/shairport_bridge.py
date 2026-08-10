@@ -45,27 +45,26 @@ def update_shairport_conf_name(new_name: str, template_path: str = "shairport-sy
         log.debug("[AirPlay] 更新 %s 设备名称失败: %s", template_path, exc)
 
 
+_shairport_proc: subprocess.Popen | None = None
+
+
 def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expected_name: str = ""):
-    """检测宿主机 Shairport-Sync 配置文件，比对根目录模板内容，若不匹配则自动备份并覆盖更新。"""
-    # 自动创建管道目录 /tmp/shairport 确保 shairport-sync 重启时管道文件目录必定存在
-    try:
-        os.makedirs("/tmp/shairport", exist_ok=True)
-    except Exception:
-        pass
+    """检测宿主机 Shairport-Sync 配置文件，比对根目录模板内容，并全自动托管保障 Shairport 进程后台运行。"""
+    global _shairport_proc
+    os.makedirs("/tmp/shairport", exist_ok=True)
 
     if expected_name:
         update_shairport_conf_name(expected_name)
 
     # 优先读取项目根目录下的 shairport-sync.conf 模板文件
     example_path = os.path.join(os.getcwd(), "shairport-sync.conf")
+    expected_conf = ""
     if os.path.exists(example_path):
         try:
             with open(example_path, "r", encoding="utf-8") as ef:
                 expected_conf = ef.read()
         except Exception:
             expected_conf = ""
-    else:
-        expected_conf = ""
 
     if not expected_conf:
         name_str = expected_name or "MiPlay 全屋播放"
@@ -85,56 +84,55 @@ def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expect
             "};\n"
         )
 
-    if not os.path.exists(config_path):
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
+                current_content = f.read()
+
+            if current_content.strip() != expected_conf.strip():
+                log.warning("[AirPlay] 检测到宿主机配置 (%s) 与期望配置不匹配，正在自动覆盖与同步...", config_path)
+                bak_path = config_path + ".bak"
+                if not os.path.exists(bak_path):
+                    import shutil
+                    shutil.copy2(config_path, bak_path)
+                    log.info("[AirPlay] 已备份原配置文件至 %s", bak_path)
+
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(expected_conf)
+                log.info("[AirPlay] 成功同步更新 %s 的配置文件", config_path)
+        except PermissionError:
+            log.warning("[AirPlay] 发现 %s 内容需要更新，但当前缺乏写权限。", config_path)
+        except Exception as exc:
+            log.debug("[AirPlay] 检测/修补配置文件 %s 时忽略异常: %s", config_path, exc)
+
+    # 尝试系统服务启动 (Linux systemctl / macOS brew services)
+    import subprocess
+    import sys
+
+    is_mac = sys.platform == "darwin"
+    cmd = ["brew", "services", "restart", "shairport-sync"] if is_mac else ["systemctl", "restart", "shairport-sync"]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    if res.returncode == 0:
+        log.info("[AirPlay] 成功通过系统服务启动 Shairport-Sync")
         return
 
+    # 若系统服务启动失败，采用 Popen 自动托管直接拉起后台进程
     try:
-        with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
-            current_content = f.read()
+        if _shairport_proc and _shairport_proc.poll() is None:
+            return  # 已经由 Python 托管拉起且正常运行中
 
-        # 比对宿主机内容与期望配置是否完全相同
-        if current_content.strip() == expected_conf.strip():
-            log.info("[AirPlay] 读取到已匹配的 Shairport-Sync 管道配置文件 (%s)", config_path)
-            return
-
-        log.warning("[AirPlay] 检测到宿主机配置 (%s) 与期望配置不匹配，正在自动覆盖与同步...", config_path)
-
-        bak_path = config_path + ".bak"
-        if not os.path.exists(bak_path):
-            import shutil
-            shutil.copy2(config_path, bak_path)
-            log.info("[AirPlay] 已备份原配置文件至 %s", bak_path)
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(expected_conf)
-
-        log.info("[AirPlay] 成功同步更新 %s，音频管道指向 /tmp/shairport/audio.fifo", config_path)
-
-        # 根据 OS 平台精确定向重启指令与提示 (Linux apt 对应 systemctl, macOS homebrew 对应 brew services)
-        import subprocess
-        import sys
-
-        is_mac = sys.platform == "darwin"
-        cmd = ["brew", "services", "restart", "shairport-sync"] if is_mac else ["systemctl", "restart", "shairport-sync"]
-        manual_hint = "brew services restart shairport-sync" if is_mac else "sudo systemctl restart shairport-sync"
-
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-        if res.returncode == 0:
-            log.info("[AirPlay] 成功重启宿主机 shairport-sync 服务")
-        else:
-            err_msg = (res.stderr or res.stdout or "").strip()
-            log.warning(
-                "[AirPlay] 重启 shairport-sync 服务失败 (%s)。请手动运行: %s",
-                err_msg or f"exit code {res.returncode}",
-                manual_hint,
-            )
-
-    except PermissionError:
-        log.warning("[AirPlay] 发现 %s 内容需要更新，但当前缺乏写权限。", config_path)
-        log.warning("[AirPlay] 请在终端运行: sudo sh -c 'cp %s %s.bak && miplay --dev'", config_path, config_path)
+        # 先清理残留的死锁进程
+        subprocess.run(["pkill", "-9", "shairport-sync"], capture_output=True, check=False)
+        conf_to_use = config_path if os.path.exists(config_path) else example_path
+        _shairport_proc = subprocess.Popen(
+            ["shairport-sync", "-c", conf_to_use],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log.info("[AirPlay] 成功自动托管拉起 Shairport-Sync 后台进程 (PID: %d)", _shairport_proc.pid)
     except Exception as exc:
-        log.debug("[AirPlay] 检测/修补配置文件 %s 时忽略异常: %s", config_path, exc)
+        log.error("[AirPlay] 自动托管拉起 Shairport-Sync 进程失败: %s", exc)
 
 
 class ShairportBridge:
@@ -173,6 +171,7 @@ class ShairportBridge:
 
     async def stop(self):
         """停止管道监听。"""
+        global _shairport_proc
         self._running = False
         if self._task:
             self._task.cancel()
@@ -188,6 +187,15 @@ class ShairportBridge:
             except asyncio.CancelledError:
                 pass
             self._meta_task = None
+
+        if _shairport_proc:
+            try:
+                _shairport_proc.terminate()
+                _shairport_proc.wait(timeout=2)
+            except Exception:
+                pass
+            _shairport_proc = None
+
         log.info("Stopped ShairportBridge")
 
     async def _read_meta_loop(self):
