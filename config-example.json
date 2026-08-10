@@ -1,0 +1,34 @@
+{
+  "host": "",
+  "web_port": 8820,
+  "verbose": false,
+  "xiaomi": {
+    "account": "",
+    "password": "",
+    "cookie": ""
+  },
+  "notify": {
+    "channel": "serverchan",
+    "key": ""
+  },
+  "external": {
+    "wired_airplay_name": ""
+  },
+  "group": {
+    "airplay_name": "MiPlay 全屋播放 Beta",
+    "member_dids": []
+  },
+  "targets": [
+    {
+      "id": "living-room-speaker",
+      "did": "",
+      "name": "客厅音箱",
+      "airplay_name": "客厅小爱音箱",
+      "enabled": true,
+      "device_id": "",
+      "hardware": "",
+      "use_music_api": false
+    }
+  ],
+  "legacy": {}
+}
