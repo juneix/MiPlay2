@@ -216,6 +216,7 @@ class BridgeManager:
                 await stream_server.start()
 
                 self.shairport_bridge = ShairportBridge(
+                    airplay_name=self.config.group.airplay_name,
                     stream_server=stream_server,
                     on_play_start=lambda: asyncio.run_coroutine_threadsafe(
                         group_controller.play_url(stream_server.stream_url), loop
@@ -224,8 +225,13 @@ class BridgeManager:
                         group_controller.stop(), loop
                     ),
                 )
-                await self.shairport_bridge.start()
-                log.info("Started Shairport-Sync AirPlay 2 Group Pipe Bridge (AirPlay 1 Group Bridge Disabled)")
+                try:
+                    await self.shairport_bridge.start()
+                except Exception as exc:
+                    await stream_server.stop()
+                    log.error("Failed to start Shairport-Sync AirPlay 2 Group Pipe Bridge: %s", exc)
+                else:
+                    log.info("Started Shairport-Sync AirPlay 2 Group Pipe Bridge (AirPlay 1 Group Bridge Disabled)")
             else:
                 # 普通模式 (AirPlay 1)：正常启动 GroupBridge 在 53542 端口广播
                 from miplay.group_bridge import GroupBridge
@@ -236,9 +242,9 @@ class BridgeManager:
     async def stop(self):
         if self.shairport_bridge:
             try:
+                await self.shairport_bridge.stop()
                 if hasattr(self.shairport_bridge, "stream_server") and self.shairport_bridge.stream_server:
                     await self.shairport_bridge.stream_server.stop()
-                await self.shairport_bridge.stop()
             except Exception as exc:
                 log.error(f"Failed to stop shairport bridge: {exc}")
             self.shairport_bridge = None

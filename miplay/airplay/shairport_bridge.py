@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import grp
 import logging
 import os
+import pwd
+import stat
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -28,6 +31,9 @@ log = logging.getLogger("miplay")
 # FIFO I/O 读取块；不代表 AirPlay 包，PCM 帧边界由 odsc 动态确定。
 _PIPE_CHUNK_SIZE = 64 * 1024
 _SESSION_BUFFER_MAX = 2 * 1024 * 1024
+_SHAIRPORT_SERVICE = "shairport-sync.service"
+_SERVICE_START_TIMEOUT = 5.0
+_FIFO_READY_TIMEOUT = 2.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,14 @@ class MetadataEvent:
     code: str
     length: int
     data: bytes
+
+
+@dataclass(frozen=True)
+class ShairportEnvironment:
+    config_path: str
+    config_changed: bool
+    service_user: str
+    service_group: str
 
 
 def _metadata_code(value: str) -> str:
@@ -64,37 +78,85 @@ def parse_metadata_item(item_xml: str) -> MetadataEvent:
     )
 
 
-def update_shairport_conf_name(new_name: str, template_path: str = "shairport-sync.conf"):
+def update_shairport_conf_name(new_name: str, template_path: str = "shairport-sync.conf") -> bool:
     """更新项目根目录下的 shairport-sync.conf 中的设备广播名称。"""
     if not new_name:
-        return
+        return False
     full_path = os.path.join(os.getcwd(), template_path)
     if not os.path.exists(full_path):
-        return
+        raise RuntimeError(f"根目录 Shairport 配置不存在: {full_path}")
     try:
         with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
         import re
-        updated_content = re.sub(r'(name\s*=\s*")[^"]*(";)', f'\\1{new_name}\\2', content, count=1)
+        updated_content, replacements = re.subn(
+            r'(name\s*=\s*")[^"]*(";)',
+            lambda match: f"{match.group(1)}{new_name}{match.group(2)}",
+            content,
+            count=1,
+        )
+        if replacements != 1:
+            raise RuntimeError(f"根目录 Shairport 配置缺少唯一的 name 项: {full_path}")
         if updated_content != content:
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(updated_content)
             log.info("[AirPlay] 已更新根目录配置文件中的全屋播放设备名称为: %s", new_name)
+            return True
+        return False
     except Exception as exc:
-        log.debug("[AirPlay] 更新 %s 设备名称失败: %s", template_path, exc)
+        raise RuntimeError(f"更新根目录 Shairport 配置失败: {exc}") from exc
 
 
-_shairport_proc: subprocess.Popen | None = None
+def _service_identity() -> tuple[str, str, int, int]:
+    result = subprocess.run(
+        ["systemctl", "show", _SHAIRPORT_SERVICE, "--property=User", "--property=Group", "--no-pager"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"无法读取 {_SHAIRPORT_SERVICE} 身份: {(result.stderr or result.stdout).strip()}")
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    user = values.get("User", "") or "root"
+    try:
+        uid = int(user)
+        user_record = pwd.getpwuid(uid)
+        service_user = str(uid)
+    except ValueError:
+        user_record = pwd.getpwnam(user)
+        uid = user_record.pw_uid
+        service_user = user
+    group = values.get("Group", "")
+    if not group:
+        gid = user_record.pw_gid
+        service_group = grp.getgrgid(gid).gr_name
+    else:
+        try:
+            gid = int(group)
+            service_group = str(gid)
+        except ValueError:
+            gid = grp.getgrnam(group).gr_gid
+            service_group = group
+    return service_user, service_group, uid, gid
 
 
-def _prepare_shairport_env(config_path: str = "/etc/shairport-sync.conf", expected_name: str = "") -> str:
-    """创建管道目录/FIFO文件，同步配置文件。返回最终使用的 conf 路径。"""
+def _prepare_fifo(path: str, uid: int, gid: int) -> None:
+    if os.path.exists(path):
+        if not stat.S_ISFIFO(os.stat(path).st_mode):
+            raise RuntimeError(f"Shairport FIFO 路径不是 FIFO，拒绝覆盖: {path}")
+    else:
+        os.mkfifo(path, 0o660)
+    os.chown(path, uid, gid)
+    os.chmod(path, 0o660)
+
+
+def _prepare_shairport_env(config_path: str = "/etc/shairport-sync.conf", expected_name: str = "") -> ShairportEnvironment:
+    """同步配置并准备 systemd Shairport-Sync 使用的 FIFO。"""
+    service_user, service_group, service_uid, service_gid = _service_identity()
     os.makedirs("/tmp/shairport", exist_ok=True)
+    os.chmod("/tmp/shairport", 0o755)
+    os.chown("/tmp/shairport", service_uid, service_gid)
 
-    # 预建 FIFO 特殊文件（shairport-sync 写端 open 前读端必须已存在）
     for fifo in ("/tmp/shairport/audio.fifo", "/tmp/shairport/metadata.fifo"):
-        if not os.path.exists(fifo):
-            os.mkfifo(fifo)
+        _prepare_fifo(fifo, service_uid, service_gid)
 
     if expected_name:
         update_shairport_conf_name(expected_name)
@@ -126,61 +188,89 @@ def _prepare_shairport_env(config_path: str = "/etc/shairport-sync.conf", expect
             "};\n"
         )
 
-    if os.path.exists(config_path):
+    config_changed = not os.path.exists(config_path)
+    try:
         try:
             with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
                 current_content = f.read()
-            if current_content.strip() != expected_conf.strip():
-                log.warning("[AirPlay] 检测到宿主机配置 (%s) 与期望配置不匹配，正在自动覆盖与同步...", config_path)
-                bak_path = config_path + ".bak"
-                if not os.path.exists(bak_path):
-                    import shutil
-                    shutil.copy2(config_path, bak_path)
-                    log.info("[AirPlay] 已备份原配置文件至 %s", bak_path)
-                with open(config_path, "w", encoding="utf-8") as f:
-                    f.write(expected_conf)
-                log.info("[AirPlay] 成功同步更新 %s 的配置文件", config_path)
-        except PermissionError:
-            log.warning("[AirPlay] 发现 %s 内容需要更新，但当前缺乏写权限。", config_path)
-        except Exception as exc:
-            log.debug("[AirPlay] 检测/修补配置文件 %s 时忽略异常: %s", config_path, exc)
+        except FileNotFoundError:
+            current_content = ""
+        if current_content.strip() != expected_conf.strip():
+            bak_path = config_path + ".bak"
+            if os.path.exists(config_path) and not os.path.exists(bak_path):
+                import shutil
+                shutil.copy2(config_path, bak_path)
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write(expected_conf)
+            config_changed = True
+            log.info("[AirPlay] 已同步更新 %s", config_path)
+    except PermissionError as exc:
+        raise RuntimeError(f"无法写入 Shairport 配置 {config_path}: {exc}") from exc
 
-    return config_path if os.path.exists(config_path) else example_path
+    return ShairportEnvironment(config_path, config_changed, service_user, service_group)
 
 
-def _start_shairport_proc(conf_path: str) -> None:
-    """清理残留进程后用 Popen 拉起 shairport-sync，要求调用前读端 FIFO 已打开。"""
-    global _shairport_proc
-    import subprocess
+def is_shairport_service_active() -> bool:
+    return subprocess.run(
+        ["systemctl", "is-active", "--quiet", _SHAIRPORT_SERVICE], check=False
+    ).returncode == 0
 
-    if _shairport_proc and _shairport_proc.poll() is None:
-        log.info("[AirPlay] Shairport-Sync 已由 Python 托管运行 (PID: %d)", _shairport_proc.pid)
-        return
+
+def get_shairport_service_main_pid() -> int:
+    result = subprocess.run(
+        ["systemctl", "show", _SHAIRPORT_SERVICE, "--property=MainPID", "--value", "--no-pager"],
+        capture_output=True, text=True, check=False,
+    )
     try:
-        subprocess.run(["pkill", "-9", "shairport-sync"], capture_output=True, check=False)
-        version = subprocess.run(
-            ["shairport-sync", "--version"], capture_output=True, text=True, check=False
-        )
-        version_text = (version.stdout or version.stderr).strip().splitlines()
-        if version_text:
-            log.info("[AirPlay] Shairport-Sync 版本: %s", version_text[0])
-        _shairport_proc = subprocess.Popen(
-            ["shairport-sync", "-c", conf_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(0.05)
-        if _shairport_proc.poll() is None:
-            log.info("[AirPlay] 成功自动托管拉起 Shairport-Sync 后台进程 (PID: %d)", _shairport_proc.pid)
-        else:
-            log.error("[AirPlay] Shairport-Sync 启动后立即退出 (code=%s)", _shairport_proc.returncode)
-    except Exception as exc:
-        log.error("[AirPlay] 自动托管拉起 Shairport-Sync 进程失败: %s", exc)
+        return int(result.stdout.strip() or "0")
+    except ValueError:
+        return 0
 
 
-# 保持向后兼容（app.py 调用入口）
-def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expected_name: str = "") -> None:
-    _prepare_shairport_env(config_path, expected_name)
+def _service_restart_count() -> int:
+    result = subprocess.run(
+        ["systemctl", "show", _SHAIRPORT_SERVICE, "--property=NRestarts", "--value", "--no-pager"],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        return int(result.stdout.strip() or "0")
+    except ValueError:
+        return 0
+
+
+def _log_shairport_journal() -> None:
+    journal = subprocess.run(
+        ["journalctl", "-u", _SHAIRPORT_SERVICE, "-n", "50", "--no-pager"],
+        capture_output=True, text=True, check=False,
+    )
+    if journal.stdout:
+        log.error("[AirPlay] Shairport-Sync 最近日志:\n%s", journal.stdout.strip())
+
+
+def restart_shairport_service() -> int:
+    result = subprocess.run(
+        ["systemctl", "restart", _SHAIRPORT_SERVICE], capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        log.error("[AirPlay] Shairport-Sync systemd 重启失败: %s", (result.stderr or result.stdout).strip())
+        _log_shairport_journal()
+        raise RuntimeError("systemd 重启 shairport-sync.service 失败")
+    deadline = time.monotonic() + _SERVICE_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if is_shairport_service_active():
+            pid = get_shairport_service_main_pid()
+            if pid > 0:
+                restart_count = _service_restart_count()
+                time.sleep(0.5)
+                if (
+                    is_shairport_service_active()
+                    and get_shairport_service_main_pid() > 0
+                    and _service_restart_count() == restart_count
+                ):
+                    return get_shairport_service_main_pid()
+        time.sleep(0.1)
+    _log_shairport_journal()
+    raise RuntimeError("shairport-sync.service 未在限定时间内进入 active/MainPID 状态")
 
 
 class ShairportBridge:
@@ -194,12 +284,14 @@ class ShairportBridge:
         self,
         pipe_path: str = "/tmp/shairport/audio.fifo",
         meta_path: str = "/tmp/shairport/metadata.fifo",
+        airplay_name: str = "MiPlay 全屋播放",
         stream_server: AudioStreamServer | None = None,
         on_play_start: Callable[[], None] | None = None,
         on_play_stop: Callable[[], None] | None = None,
     ):
         self.pipe_path = pipe_path
         self.meta_path = meta_path
+        self.airplay_name = airplay_name
         self.stream_server = stream_server
         self.on_play_start = on_play_start
         self.on_play_stop = on_play_stop
@@ -208,7 +300,10 @@ class ShairportBridge:
         self._running = False
         self._task: asyncio.Task | None = None
         self._meta_task: asyncio.Task | None = None
-        self._stderr_task: asyncio.Task | None = None
+        self._service_task: asyncio.Task | None = None
+        self._audio_reader_ready: asyncio.Event | None = None
+        self._metadata_reader_ready: asyncio.Event | None = None
+        self._service_alive = False
         self._format_wait_task: asyncio.Task | None = None
         self._session_active = False
         self._play_url_sent = False
@@ -364,26 +459,50 @@ class ShairportBridge:
             self.artwork = "data:image/jpeg;base64," + base64.b64encode(event.data).decode("ascii")
 
     async def start(self):
-        """启动管道异步读取监听循环。
-
-        正确时序：先打开 FIFO 读端 fd → 再拉起 shairport-sync 写端进程。
-        shairport-sync 的 O_WRONLY open 会阻塞等待读端，因此读端必须先就绪。
-        """
-        conf_path = _prepare_shairport_env()  # 建目录 / mkfifo / 同步配置
-        self._running = True
-        self._task = asyncio.create_task(self._read_loop())
-        self._meta_task = asyncio.create_task(self._read_meta_loop())
-        # 让事件循环跑一轮，_read_loop 用 O_RDONLY|O_NONBLOCK 把读端 fd 打开
-        await asyncio.sleep(0.05)
-        # 读端已就绪，现在拉起 shairport-sync（写端 open 不再阻塞）
-        _start_shairport_proc(conf_path)
-        if _shairport_proc and _shairport_proc.stderr:
-            self._stderr_task = asyncio.create_task(self._read_shairport_stderr())
-        log.info("Started ShairportBridge on pipe %s", self.pipe_path)
+        """准备 FIFO 读端后，通过 systemd 受控重启唯一的 Shairport-Sync。"""
+        try:
+            env = await asyncio.to_thread(
+                _prepare_shairport_env, "/etc/shairport-sync.conf", self.airplay_name
+            )
+            self._audio_reader_ready = asyncio.Event()
+            self._metadata_reader_ready = asyncio.Event()
+            self._running = True
+            self._task = asyncio.create_task(self._read_loop())
+            self._meta_task = asyncio.create_task(self._read_meta_loop())
+            await asyncio.wait_for(
+                asyncio.gather(
+                    self._audio_reader_ready.wait(),
+                    self._metadata_reader_ready.wait(),
+                ),
+                timeout=_FIFO_READY_TIMEOUT,
+            )
+            pid = await asyncio.to_thread(restart_shairport_service)
+            self._service_alive = True
+            self._service_task = asyncio.create_task(self._monitor_service())
+            log.info(
+                "[AirPlay] systemd Shairport-Sync 接管成功 "
+                "(PID: %d, User: %s, Group: %s, config_changed=%s)",
+                pid, env.service_user, env.service_group, env.config_changed,
+            )
+            log.info("Started ShairportBridge on pipe %s", self.pipe_path)
+        except Exception as exc:
+            self._running = False
+            for task in (self._task, self._meta_task):
+                if task:
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (self._task, self._meta_task) if task),
+                return_exceptions=True,
+            )
+            self._task = None
+            self._meta_task = None
+            self._service_alive = False
+            self.session_state = "error"
+            self.last_error = str(exc)
+            raise RuntimeError(f"AirPlay 2 systemd 接管失败: {exc}") from exc
 
     async def stop(self):
-        """停止管道监听。"""
-        global _shairport_proc
+        """停止 MiPlay FIFO 监听；保留 systemd Shairport-Sync 后台服务。"""
         self._running = False
         self._end_session()
         if self._task:
@@ -400,35 +519,24 @@ class ShairportBridge:
             except asyncio.CancelledError:
                 pass
             self._meta_task = None
-        if self._stderr_task:
-            self._stderr_task.cancel()
+        if self._service_task:
+            self._service_task.cancel()
             try:
-                await self._stderr_task
+                await self._service_task
             except asyncio.CancelledError:
                 pass
-            self._stderr_task = None
-        if _shairport_proc:
-            try:
-                _shairport_proc.terminate()
-                _shairport_proc.wait(timeout=2)
-            except Exception:
-                pass
-            _shairport_proc = None
+            self._service_task = None
 
         log.info("Stopped ShairportBridge")
 
-    async def _read_shairport_stderr(self):
-        while self._running and _shairport_proc and _shairport_proc.stderr:
-            line = await asyncio.to_thread(_shairport_proc.stderr.readline)
-            if not line:
-                if _shairport_proc.poll() is not None:
-                    self._end_session(
-                        f"Shairport-Sync 进程退出 (code={_shairport_proc.returncode})"
-                    )
+    async def _monitor_service(self):
+        while self._running:
+            await asyncio.sleep(2.0)
+            if not await asyncio.to_thread(is_shairport_service_active):
+                self._service_alive = False
+                self._end_session("shairport-sync.service 已停止")
+                self.session_state = "error"
                 return
-            message = line.decode("utf-8", errors="replace").strip()
-            if message:
-                log.info("[AirPlay] Shairport-Sync: %s", message)
 
     async def _read_meta_loop(self):
         """解析 Shairport-Sync 元数据管道中的 ID3 歌名、歌手与封面图。"""
@@ -444,6 +552,8 @@ class ShairportBridge:
                 meta_fd = await loop.run_in_executor(
                     None, lambda: os.open(self.meta_path, os.O_RDONLY | os.O_NONBLOCK)
                 )
+                if self._metadata_reader_ready:
+                    self._metadata_reader_ready.set()
             except Exception:
                 await asyncio.sleep(2.0)
                 continue
@@ -492,6 +602,8 @@ class ShairportBridge:
                 pipe_fd = await loop.run_in_executor(
                     None, lambda: os.open(self.pipe_path, os.O_RDONLY | os.O_NONBLOCK)
                 )
+                if self._audio_reader_ready:
+                    self._audio_reader_ready.set()
             except Exception as e:
                 log.debug("Waiting for Shairport pipe opening: %s", e)
                 await asyncio.sleep(1.0)
@@ -524,6 +636,6 @@ class ShairportBridge:
             "session_state": self.session_state,
             "input_format": self.input_format,
             "output_format": self.output_format,
-            "shairport_alive": bool(_shairport_proc and _shairport_proc.poll() is None),
+            "shairport_alive": self._service_alive,
             "last_error": self.last_error,
         }
