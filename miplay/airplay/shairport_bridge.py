@@ -104,20 +104,25 @@ def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expect
 
         log.info("[AirPlay] 成功同步更新 %s，音频管道指向 /tmp/shairport/audio.fifo", config_path)
 
-        # 尝试重启宿主机 shairport-sync 服务 (兼容 Linux systemctl 与 macOS brew services)
+        # 根据 OS 平台精确定向重启指令与提示 (Linux apt 对应 systemctl, macOS homebrew 对应 brew services)
         import subprocess
         import sys
 
-        res = None
-        if sys.platform == "darwin":
-            res = subprocess.run(["brew", "services", "restart", "shairport-sync"], capture_output=True, check=False)
-        else:
-            res = subprocess.run(["systemctl", "restart", "shairport-sync"], capture_output=True, check=False)
+        is_mac = sys.platform == "darwin"
+        cmd = ["brew", "services", "restart", "shairport-sync"] if is_mac else ["systemctl", "restart", "shairport-sync"]
+        manual_hint = "brew services restart shairport-sync" if is_mac else "sudo systemctl restart shairport-sync"
 
-        if res and res.returncode == 0:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+        if res.returncode == 0:
             log.info("[AirPlay] 成功重启宿主机 shairport-sync 服务")
         else:
-            log.info("[AirPlay] 配置文件已更新，请手动重启 shairport-sync 服务生效 (如 sudo systemctl restart shairport-sync)")
+            err_msg = (res.stderr or res.stdout or "").strip()
+            log.warning(
+                "[AirPlay] 重启 shairport-sync 服务失败 (%s)。请手动运行: %s",
+                err_msg or f"exit code {res.returncode}",
+                manual_hint,
+            )
 
     except PermissionError:
         log.warning("[AirPlay] 发现 %s 内容需要更新，但当前缺乏写权限。", config_path)

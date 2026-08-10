@@ -200,9 +200,9 @@ class BridgeManager:
 
         # 启动全屋虚拟 AirPlay 设备（默认自动开启，无需显式开关）
         if controllers:
-            from miplay.group_bridge import GroupAirPlayBridge, GroupXiaomiTargetController
-            group_controller = GroupXiaomiTargetController(self.config, lambda: controllers)
-            self.group_bridge = GroupAirPlayBridge(self.host, group_controller, self._shared_zeroconf, self.config)
+            from miplay.group_bridge import GroupBridge, GroupController
+            group_controller = GroupController(self.config, lambda: controllers)
+            self.group_bridge = GroupBridge(self.host, group_controller, self._shared_zeroconf, self.config)
             await self.group_bridge.start()
             log.info("Started Group AirPlay bridge endpoint: %s", self.config.group.airplay_name)
 
