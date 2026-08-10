@@ -214,6 +214,7 @@ class BridgeManager:
                 loop = asyncio.get_running_loop()
                 stream_server = AudioStreamServer(self.host)
                 await stream_server.start()
+                stream_server.start_streaming()
 
                 self.shairport_bridge = ShairportBridge(
                     stream_server=stream_server,
