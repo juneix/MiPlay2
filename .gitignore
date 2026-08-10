@@ -21,6 +21,8 @@ conf/
 *.log
 *.pcm
 tmp/
+tests/
+scratch/
 
 
 # 系统文件

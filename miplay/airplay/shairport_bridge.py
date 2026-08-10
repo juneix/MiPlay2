@@ -12,17 +12,56 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
+import subprocess
 import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from typing import Callable
 
-from miplay.airplay.audio_stream import AudioStreamServer
+from miplay.airplay.audio_stream import AudioStreamServer, PCMFormat
 
 log = logging.getLogger("miplay")
 
-# 单次读取块字节数: 352 个采样帧 * 2 声道 * 2 字节 (16-bit) = 1408 字节 (约 8ms 音频)
-_PIPE_CHUNK_SIZE = 1408
+# FIFO I/O 读取块；不代表 AirPlay 包，PCM 帧边界由 odsc 动态确定。
+_PIPE_CHUNK_SIZE = 64 * 1024
+_SESSION_BUFFER_MAX = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class MetadataEvent:
+    type: str
+    code: str
+    length: int
+    data: bytes
+
+
+def _metadata_code(value: str) -> str:
+    try:
+        return bytes.fromhex((value or "").strip()).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return (value or "").strip()
+
+
+def parse_metadata_item(item_xml: str) -> MetadataEvent:
+    root = ET.fromstring(item_xml)
+    length_text = (root.findtext("length") or "0").strip()
+    try:
+        length = int(length_text)
+    except ValueError:
+        length = 0
+    data_node = root.find("data")
+    data = b""
+    if data_node is not None and data_node.text:
+        data = base64.b64decode("".join(data_node.text.split()), validate=False)
+    return MetadataEvent(
+        (root.findtext("type") or "").strip(),
+        _metadata_code(root.findtext("code") or ""),
+        length,
+        data,
+    )
 
 
 def update_shairport_conf_name(new_name: str, template_path: str = "shairport-sync.conf"):
@@ -119,12 +158,22 @@ def _start_shairport_proc(conf_path: str) -> None:
         return
     try:
         subprocess.run(["pkill", "-9", "shairport-sync"], capture_output=True, check=False)
+        version = subprocess.run(
+            ["shairport-sync", "--version"], capture_output=True, text=True, check=False
+        )
+        version_text = (version.stdout or version.stderr).strip().splitlines()
+        if version_text:
+            log.info("[AirPlay] Shairport-Sync 版本: %s", version_text[0])
         _shairport_proc = subprocess.Popen(
             ["shairport-sync", "-c", conf_path],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
-        log.info("[AirPlay] 成功自动托管拉起 Shairport-Sync 后台进程 (PID: %d)", _shairport_proc.pid)
+        time.sleep(0.05)
+        if _shairport_proc.poll() is None:
+            log.info("[AirPlay] 成功自动托管拉起 Shairport-Sync 后台进程 (PID: %d)", _shairport_proc.pid)
+        else:
+            log.error("[AirPlay] Shairport-Sync 启动后立即退出 (code=%s)", _shairport_proc.returncode)
     except Exception as exc:
         log.error("[AirPlay] 自动托管拉起 Shairport-Sync 进程失败: %s", exc)
 
@@ -159,6 +208,160 @@ class ShairportBridge:
         self._running = False
         self._task: asyncio.Task | None = None
         self._meta_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
+        self._format_wait_task: asyncio.Task | None = None
+        self._session_active = False
+        self._play_url_sent = False
+        self._session_buffer = bytearray()
+        self._partial_frame = bytearray()
+        self._pcm_format: PCMFormat | None = None
+        self._last_pcm_format: PCMFormat | None = None
+        self.session_state = "idle"
+        self.input_format = ""
+        self.output_format = ""
+        self.last_error = ""
+
+    def _stop_group_session(self, notify_stop: bool = True):
+        was_started = self._play_url_sent
+        if self.stream_server and self.stream_server._active:
+            self.stream_server.stop_streaming()
+        self._play_url_sent = False
+        if notify_stop and was_started and self.on_play_stop:
+            try:
+                self.on_play_stop()
+            except Exception as exc:
+                log.error("[AirPlay] on_play_stop 回调失败: %s", exc)
+
+    def _begin_session(self):
+        if self._session_active:
+            self._stop_group_session()
+        if self._format_wait_task:
+            self._format_wait_task.cancel()
+            self._format_wait_task = None
+        self._session_active = True
+        self._pcm_format = None
+        self._session_buffer.clear()
+        self._partial_frame.clear()
+        self.session_state = "waiting_format"
+        self.output_format = ""
+        self.last_error = ""
+        log.info("[AirPlay] Shairport 会话开始 (pbeg)")
+
+    def _end_session(self, error: str = ""):
+        if self._format_wait_task:
+            self._format_wait_task.cancel()
+            self._format_wait_task = None
+        if error:
+            self.last_error = error
+            log.error("[AirPlay] %s", error)
+        self._stop_group_session()
+        self._session_active = False
+        self._pcm_format = None
+        self._session_buffer.clear()
+        self._partial_frame.clear()
+        self.session_state = "idle"
+
+    def _start_group_session(self):
+        if not self._session_active or not self._pcm_format or not self._session_buffer:
+            return
+        frame_size = self._pcm_format.bytes_per_frame
+        aligned = len(self._session_buffer) - len(self._session_buffer) % frame_size
+        if aligned <= 0:
+            return
+        first_pcm = bytes(self._session_buffer[:aligned])
+        self._partial_frame.extend(self._session_buffer[aligned:])
+        self._session_buffer.clear()
+        if self._format_wait_task:
+            self._format_wait_task.cancel()
+            self._format_wait_task = None
+        if self.stream_server:
+            self.stream_server.start_streaming(self._pcm_format)
+            self.stream_server.write_pcm(first_pcm, bootstrap=True)
+        self.session_state = "playing"
+        self._play_url_sent = True
+        if self.on_play_start:
+            try:
+                self.on_play_start()
+            except Exception as exc:
+                log.error("[AirPlay] on_play_start 回调失败: %s", exc)
+
+    async def _resolve_cached_format(self, delay: float):
+        try:
+            await asyncio.sleep(delay)
+            if not self._session_active or self._pcm_format or not self._session_buffer:
+                return
+            if self._last_pcm_format:
+                self._pcm_format = self._last_pcm_format
+                self.output_format = self._pcm_format.describe()
+                self._start_group_session()
+            else:
+                self._end_session("首次 AirPlay 2 会话 2 秒内未收到 odsc，已停止")
+        except asyncio.CancelledError:
+            pass
+
+    def _handle_pcm(self, data: bytes):
+        if not self._session_active or not data:
+            return
+        if not self._pcm_format:
+            self._session_buffer.extend(data)
+            if len(self._session_buffer) > _SESSION_BUFFER_MAX:
+                del self._session_buffer[:-_SESSION_BUFFER_MAX]
+            if not self._format_wait_task:
+                delay = 0.5 if self._last_pcm_format else 2.0
+                self._format_wait_task = asyncio.create_task(self._resolve_cached_format(delay))
+            return
+
+        self._partial_frame.extend(data)
+        frame_size = self._pcm_format.bytes_per_frame
+        aligned = len(self._partial_frame) - len(self._partial_frame) % frame_size
+        if aligned <= 0:
+            return
+        chunk = bytes(self._partial_frame[:aligned])
+        del self._partial_frame[:aligned]
+        if self.session_state == "waiting_format":
+            self._session_buffer.extend(chunk)
+            self._start_group_session()
+        elif self.session_state == "playing" and self.stream_server:
+            self.stream_server.write_pcm(chunk)
+
+    def _handle_metadata_event(self, event: MetadataEvent):
+        if event.code == "pbeg":
+            self._begin_session()
+        elif event.code == "pend":
+            log.info("[AirPlay] Shairport 会话结束 (pend)")
+            self._end_session()
+        elif event.code == "paus" and self._play_url_sent:
+            self.session_state = "paused"
+        elif event.code == "pres" and self._session_active:
+            self.session_state = "playing" if self._play_url_sent else "waiting_format"
+        elif event.code == "sdsc":
+            self.input_format = event.data.decode("utf-8", errors="replace").strip().rstrip("\x00")
+        elif event.code == "odsc":
+            value = event.data.decode("utf-8", errors="replace").strip().rstrip("\x00")
+            try:
+                pcm_format = PCMFormat.from_odsc(value)
+            except ValueError as exc:
+                self._end_session(str(exc))
+                return
+            changed = self._pcm_format is not None and pcm_format != self._pcm_format
+            if changed and self._play_url_sent:
+                self._stop_group_session(notify_stop=False)
+                self._session_buffer.clear()
+                self._partial_frame.clear()
+                self.session_state = "waiting_format"
+            self._pcm_format = pcm_format
+            self._last_pcm_format = pcm_format
+            self.output_format = pcm_format.describe()
+            log.info("[AirPlay] Shairport 输出格式 (odsc): %s", self.output_format)
+            self._start_group_session()
+        elif event.code == "minm":
+            self.metadata["title"] = event.data.decode("utf-8", errors="ignore")
+        elif event.code == "asar":
+            self.metadata["artist"] = event.data.decode("utf-8", errors="ignore")
+        elif event.code == "asal":
+            self.metadata["album"] = event.data.decode("utf-8", errors="ignore")
+        elif event.code == "PICT":
+            self.artwork = "data:image/jpeg;base64," + base64.b64encode(event.data).decode("ascii")
 
     async def start(self):
         """启动管道异步读取监听循环。
@@ -174,12 +377,15 @@ class ShairportBridge:
         await asyncio.sleep(0.05)
         # 读端已就绪，现在拉起 shairport-sync（写端 open 不再阻塞）
         _start_shairport_proc(conf_path)
+        if _shairport_proc and _shairport_proc.stderr:
+            self._stderr_task = asyncio.create_task(self._read_shairport_stderr())
         log.info("Started ShairportBridge on pipe %s", self.pipe_path)
 
     async def stop(self):
         """停止管道监听。"""
         global _shairport_proc
         self._running = False
+        self._end_session()
         if self._task:
             self._task.cancel()
             try:
@@ -194,7 +400,13 @@ class ShairportBridge:
             except asyncio.CancelledError:
                 pass
             self._meta_task = None
-
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_task = None
         if _shairport_proc:
             try:
                 _shairport_proc.terminate()
@@ -205,11 +417,21 @@ class ShairportBridge:
 
         log.info("Stopped ShairportBridge")
 
+    async def _read_shairport_stderr(self):
+        while self._running and _shairport_proc and _shairport_proc.stderr:
+            line = await asyncio.to_thread(_shairport_proc.stderr.readline)
+            if not line:
+                if _shairport_proc.poll() is not None:
+                    self._end_session(
+                        f"Shairport-Sync 进程退出 (code={_shairport_proc.returncode})"
+                    )
+                return
+            message = line.decode("utf-8", errors="replace").strip()
+            if message:
+                log.info("[AirPlay] Shairport-Sync: %s", message)
+
     async def _read_meta_loop(self):
         """解析 Shairport-Sync 元数据管道中的 ID3 歌名、歌手与封面图。"""
-        import base64
-        import xml.etree.ElementTree as ET
-
         while self._running:
             if os.path.exists(self.meta_path):
                 break
@@ -241,26 +463,9 @@ class ShairportBridge:
                             item_xml = buf[start:end]
                             buf = buf[end:]
                             try:
-                                root = ET.fromstring(item_xml)
-                                code_hex = root.findtext("code", "")
-                                data_b64 = root.findtext("data", "")
-                                if not code_hex or not data_b64:
-                                    continue
-                                raw_val = base64.b64decode(data_b64)
-                                # 6d696e6d: minm (Title)
-                                if code_hex == "6d696e6d":
-                                    self.metadata["title"] = raw_val.decode("utf-8", errors="ignore")
-                                # 61736172: asar (Artist)
-                                elif code_hex == "61736172":
-                                    self.metadata["artist"] = raw_val.decode("utf-8", errors="ignore")
-                                # 6173616c: asal (Album)
-                                elif code_hex == "6173616c":
-                                    self.metadata["album"] = raw_val.decode("utf-8", errors="ignore")
-                                # 50494354: PICT (Cover Artwork)
-                                elif code_hex == "50494354":
-                                    self.artwork = "data:image/jpeg;base64," + data_b64
-                            except Exception:
-                                pass
+                                self._handle_metadata_event(parse_metadata_item(item_xml))
+                            except Exception as exc:
+                                log.debug("[AirPlay] metadata 解析失败: %s", exc)
                     except (BlockingIOError, OSError):
                         await asyncio.sleep(0.1)
                     except asyncio.CancelledError:
@@ -293,12 +498,6 @@ class ShairportBridge:
                 continue
 
             try:
-                if self.on_play_start:
-                    try:
-                        self.on_play_start()
-                    except Exception as e:
-                        log.error("Error in on_play_start callback: %s", e)
-
                 while self._running:
                     try:
                         nbytes = await loop.run_in_executor(None, os.read, pipe_fd, _PIPE_CHUNK_SIZE)
@@ -306,13 +505,7 @@ class ShairportBridge:
                             await asyncio.sleep(0.01)
                             continue
 
-                        # 使用浅拷贝切片，将裸 PCM 塞入 Stream 队列
-                        chunk = bytes(nbytes)
-                        if self.stream_server and self.stream_server._active:
-                            try:
-                                self.stream_server._audio_queue.put_nowait(chunk)
-                            except Exception:
-                                pass
+                        self._handle_pcm(bytes(nbytes))
                     except (BlockingIOError, OSError):
                         await asyncio.sleep(0.01)
                     except asyncio.CancelledError:
@@ -323,14 +516,14 @@ class ShairportBridge:
                     os.close(pipe_fd)
                 except Exception:
                     pass
-                if self.on_play_stop:
-                    try:
-                        self.on_play_stop()
-                    except Exception:
-                        pass
 
     def snapshot(self) -> dict:
         return {
             "metadata": self.metadata,
             "artwork": self.artwork,
+            "session_state": self.session_state,
+            "input_format": self.input_format,
+            "output_format": self.output_format,
+            "shairport_alive": bool(_shairport_proc and _shairport_proc.poll() is None),
+            "last_error": self.last_error,
         }

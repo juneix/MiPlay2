@@ -13,15 +13,56 @@ import struct
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 
 from aiohttp import web
 
 log = logging.getLogger("miplay")
 
 # --- 队列参数 ---
-# 每个 ALAC 包约 8ms (352 samples @ 44100Hz)
-# 20 个包 ≈ 160ms 的缓冲上限
+# 队列按 PCM I/O 块计数；块大小由各接收链路决定，不绑定固定采样率或位深。
 _QUEUE_MAXSIZE = 20
+
+
+@dataclass(frozen=True)
+class PCMFormat:
+    sample_rate: int
+    sample_format: str
+    channels: int
+    bytes_per_sample: int
+    valid_bits: int
+    byte_order: str = "little"
+
+    @property
+    def bytes_per_frame(self) -> int:
+        return self.channels * self.bytes_per_sample
+
+    @classmethod
+    def from_odsc(cls, value: str) -> "PCMFormat":
+        parts = [item.strip() for item in value.strip().split("/")]
+        if len(parts) != 3:
+            raise ValueError(f"Invalid Shairport odsc: {value!r}")
+        sample_rate, sample_format, channels = parts
+        formats = {
+            "S16_LE": (2, 16),
+            "S24_3LE": (3, 24),
+            "S24_LE": (4, 24),
+            "S32_LE": (4, 32),
+        }
+        if sample_format not in formats:
+            raise ValueError(f"Unsupported native Shairport PCM format: {sample_format}")
+        try:
+            rate = int(sample_rate)
+            channel_count = int(channels)
+        except ValueError as exc:
+            raise ValueError(f"Invalid Shairport odsc: {value!r}") from exc
+        if rate <= 0 or channel_count <= 0:
+            raise ValueError(f"Invalid Shairport odsc: {value!r}")
+        width, valid_bits = formats[sample_format]
+        return cls(rate, sample_format, channel_count, width, valid_bits)
+
+    def describe(self) -> str:
+        return f"{self.sample_rate}/{self.sample_format}/{self.channels}"
 
 
 class AudioStreamServer:
@@ -46,12 +87,14 @@ class AudioStreamServer:
         self._sample_rate = 44100
         self._channels = 2
         self._sample_width = 2  # 16-bit
+        self._pcm_format = PCMFormat(44100, "S16_LE", 2, 2, 16)
         self._active = False
         self._abort = False
         self._session_id = int(time.time())
         self._has_clients = False
         self._client_lock = threading.Lock()
         self._broadcaster: threading.Thread | None = None
+        self._bootstrap_pcm = b""
 
         self._setup_routes()
 
@@ -71,6 +114,8 @@ class AudioStreamServer:
         with self._client_lock:
             self._client_queues.append(q)
             self._has_clients = True
+            if self._bootstrap_pcm:
+                q.put_nowait(self._bootstrap_pcm)
         return q
 
     def _remove_client_queue(self, q: queue.Queue[bytes | None]):
@@ -106,6 +151,8 @@ class AudioStreamServer:
         self._sample_rate = sample_rate
         self._channels = channels
         self._sample_width = sample_width
+        sample_format = {2: "S16_LE", 3: "S24_3LE", 4: "S32_LE"}.get(sample_width, "S16_LE")
+        self._pcm_format = PCMFormat(sample_rate, sample_format, channels, sample_width, sample_width * 8)
 
     def _broadcaster_loop(self):
         """后台派发线程：从主 audio_queue 持续读取，分发给所有注册的客户端队列"""
@@ -130,28 +177,37 @@ class AudioStreamServer:
             except queue.Empty:
                 continue
 
-    def start_streaming(self):
+    def start_streaming(self, pcm_format: PCMFormat | None = None):
+        if pcm_format is not None:
+            self._pcm_format = pcm_format
+            self._sample_rate = pcm_format.sample_rate
+            self._channels = pcm_format.channels
+            self._sample_width = pcm_format.bytes_per_sample
+            if self._broadcaster and self._broadcaster.is_alive():
+                self._broadcaster.join(timeout=0.1)
         self._active = True
         self._abort = False
-        self._session_id = int(time.time())
+        self._session_id = time.time_ns()
+        self._bootstrap_pcm = b""
         # 清空主队列与各客户端队列
         while True:
             try:
                 self._audio_queue.get_nowait()
             except queue.Empty:
                 break
-        with self._client_lock:
-            for q in list(self._client_queues):
-                while True:
-                    try:
-                        q.get_nowait()
-                    except queue.Empty:
-                        break
+        if pcm_format is None:
+            with self._client_lock:
+                for q in list(self._client_queues):
+                    while True:
+                        try:
+                            q.get_nowait()
+                        except queue.Empty:
+                            break
 
         if not self._broadcaster or not self._broadcaster.is_alive():
             self._broadcaster = threading.Thread(target=self._broadcaster_loop, daemon=True)
             self._broadcaster.start()
-        log.info(f"音频流: 开始接收 PCM 数据 (格式: {self._audio_format})")
+        log.info("音频流: 开始接收 PCM 数据 (格式: %s)", self._pcm_format.describe())
 
     def stop_streaming(self):
         self._active = False
@@ -173,9 +229,12 @@ class AudioStreamServer:
                     pass
         log.info("音频流: 停止接收 PCM 数据")
 
-    def write_pcm(self, data: bytes):
+    def write_pcm(self, data: bytes, *, bootstrap: bool = False):
         """写入 PCM 音频数据 — 非阻塞写入主缓冲区并自动广播"""
         if not self._active:
+            return
+        if bootstrap:
+            self._bootstrap_pcm = bytes(data)
             return
         try:
             self._audio_queue.put_nowait(data)
@@ -193,16 +252,24 @@ class AudioStreamServer:
     # WAV 模式 — 直接输出 PCM，零编码延迟
     # ============================================================
 
-    def _build_wav_header(self, data_size: int = 0x7FFFFF00) -> bytes:
-        byte_rate = self._sample_rate * self._channels * self._sample_width
-        block_align = self._channels * self._sample_width
-        bits_per_sample = self._sample_width * 8
-        return struct.pack(
-            '<4sI4s4sIHHIIHH4sI',
-            b'RIFF', data_size + 36, b'WAVE',
-            b'fmt ', 16, 1, self._channels,
-            self._sample_rate, byte_rate, block_align, bits_per_sample,
-            b'data', data_size,
+    def _build_wav_header(self, pcm_format: PCMFormat | None = None, data_size: int = 0x7FFFFF00) -> bytes:
+        fmt = pcm_format or self._pcm_format
+        byte_rate = fmt.sample_rate * fmt.bytes_per_frame
+        block_align = fmt.bytes_per_frame
+        if fmt.sample_format == "S24_LE":
+            guid = b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
+            fmt_chunk = struct.pack(
+                "<4sIHHIIHHHHI16s", b"fmt ", 40, 0xFFFE, fmt.channels,
+                fmt.sample_rate, byte_rate, block_align, 32, 22,
+                fmt.valid_bits, 0, guid,
+            )
+        else:
+            fmt_chunk = struct.pack(
+                "<4sIHHIIHH", b"fmt ", 16, 1, fmt.channels,
+                fmt.sample_rate, byte_rate, block_align, fmt.valid_bits,
+            )
+        return struct.pack("<4sI4s", b"RIFF", data_size + len(fmt_chunk) + 12, b"WAVE") + fmt_chunk + struct.pack(
+            "<4sI", b"data", data_size
         )
 
     async def _handle_stream_wav(self, request: web.Request) -> web.StreamResponse:
@@ -233,6 +300,7 @@ class AudioStreamServer:
 
         client_queue = self._create_client_queue()
         self._abort = False  # 重置中断标志，允许续播
+        session_format = self._pcm_format
 
         log.info("AirPlay: 音箱开始拉取 WAV 音频流 (零编码延迟)")
 
@@ -271,7 +339,7 @@ class AudioStreamServer:
                         empty_streak += 1
                         # 3 秒无数据写入静音保持连接
                         if empty_streak > 100:
-                            silence = b'\x00' * (self._sample_rate * self._channels * self._sample_width // 50)
+                            silence = b'\x00' * (session_format.sample_rate * session_format.bytes_per_frame // 50)
                             with data_lock:
                                 pending_data.append(silence)
                             loop.call_soon_threadsafe(data_ready.set)
@@ -287,7 +355,7 @@ class AudioStreamServer:
 
         try:
             # 发送 WAV 头
-            await response.write(self._build_wav_header())
+            await response.write(self._build_wav_header(session_format))
 
             while not writer_done:
                 await data_ready.wait()

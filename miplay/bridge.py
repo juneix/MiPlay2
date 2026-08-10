@@ -214,7 +214,6 @@ class BridgeManager:
                 loop = asyncio.get_running_loop()
                 stream_server = AudioStreamServer(self.host)
                 await stream_server.start()
-                stream_server.start_streaming()
 
                 self.shairport_bridge = ShairportBridge(
                     stream_server=stream_server,
@@ -266,19 +265,29 @@ class BridgeManager:
         if self.group_bridge:
             res.append(self.group_bridge.snapshot())
         elif self.shairport_bridge:
+            shairport_snapshot = self.shairport_bridge.snapshot()
             group_snap = {
-                "id": "group",
-                "did": "group",
-                "name": "全屋虚拟音箱",
+                "id": "group_all",
+                "did": "group_all",
+                "name": self.config.group.airplay_name,
                 "airplay_name": self.config.group.airplay_name,
                 "hardware": "GROUP",
-                "active": bool(self.shairport_bridge._running),
+                "active": shairport_snapshot["session_state"] == "playing",
                 "client_name": "Shairport-Sync AirPlay 2",
-                "metadata": self.shairport_bridge.metadata,
-                "artwork": self.shairport_bridge.artwork,
+                "metadata": shairport_snapshot["metadata"],
+                "artwork": shairport_snapshot["artwork"],
                 "rtsp_port": 0,
-                "stream_url": self.shairport_bridge.stream_server.stream_url if self.shairport_bridge.stream_server else "",
+                "stream_url": (
+                    self.shairport_bridge.stream_server.stream_url
+                    if self.shairport_bridge.stream_server and self.shairport_bridge._play_url_sent
+                    else ""
+                ),
                 "use_music_api": False,
+                "session_state": shairport_snapshot["session_state"],
+                "input_format": shairport_snapshot["input_format"],
+                "output_format": shairport_snapshot["output_format"],
+                "shairport_alive": shairport_snapshot["shairport_alive"],
+                "last_error": shairport_snapshot["last_error"],
             }
             res.append(group_snap)
         return res
