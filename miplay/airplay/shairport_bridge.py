@@ -47,6 +47,12 @@ def update_shairport_conf_name(new_name: str, template_path: str = "shairport-sy
 
 def _ensure_shairport_conf(config_path: str = "/etc/shairport-sync.conf", expected_name: str = ""):
     """检测宿主机 Shairport-Sync 配置文件，比对根目录模板内容，若不匹配则自动备份并覆盖更新。"""
+    # 自动创建管道目录 /tmp/shairport 确保 shairport-sync 重启时管道文件目录必定存在
+    try:
+        os.makedirs("/tmp/shairport", exist_ok=True)
+    except Exception:
+        pass
+
     if expected_name:
         update_shairport_conf_name(expected_name)
 
