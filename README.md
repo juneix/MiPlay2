@@ -102,10 +102,10 @@ flowchart TD
 
 ### 1、Docker Compose（推荐）
 
-* **部署纯净基础版 (默认)**：使用根目录下的 `compose.yml` (执行 `docker compose up -d`)
 ```yaml
 services:
   miplay:
+    #image: docker.1ms.run/juneix/miplay2 # 毫秒镜像加速 
     image: ghcr.io/juneix/miplay2:latest
     container_name: miplay
     network_mode: host
@@ -114,25 +114,6 @@ services:
       WEB_PORT: 8820
     volumes:
       - ./conf:/app/conf
-```
-
-* **部署 AirPlay 2 增强版**：使用根目录下的 `compose.dev.yml` (执行 `docker compose -f compose.dev.yml up -d`)
-```yaml
-services:
-  miplay-dev:
-    image: ghcr.io/juneix/miplay2:dev
-    container_name: miplay-dev
-    network_mode: host
-    restart: unless-stopped
-    environment:
-      WEB_PORT: 8820
-    volumes:
-      - ./conf:/app/conf
-    devices:
-      - /dev/snd:/dev/snd
-    cap_add:
-      - SYS_NICE
-      - NET_ADMIN
 ```
 
 ### 2、Docker CLI
@@ -154,7 +135,7 @@ docker run -d \
 
 ![miplay-3.webp](./img/miplay-3.webp)
 
-### 4、uv 极简本地运行
+### 4、uv 本地运行
 
 ```bash
 # 安装 uv 包管理器
@@ -164,13 +145,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/juneix/MiPlay2.git
 cd MiPlay2
 
-# 1. 本地极简直接运行 (默认 AirPlay 1 模式)
+# 1. 本地直接运行
 uv run miplay
 
-# 2. 本地 Dev 管道运行 (AirPlay 2 模式)
-uv run miplay --dev
-
-# 3. (可选) 全局安装为系统 CLI 命令，之后可在任何目录下直接输入 miplay
+# 2. (可选) 全局安装为系统 CLI 命令，任何目录直接启动
 uv tool install .
 miplay
 ```
