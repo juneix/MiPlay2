@@ -112,7 +112,10 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         if "group" in data:
             group_data = data["group"]
             if "airplay_name" in group_data:
-                config.group.airplay_name = str(group_data["airplay_name"]).strip()
+                new_name = str(group_data["airplay_name"]).strip()
+                config.group.airplay_name = new_name
+                from miplay.airplay.shairport_bridge import update_shairport_conf_name
+                update_shairport_conf_name(new_name)
             if "member_dids" in group_data:
                 config.group.member_dids = [str(d) for d in group_data["member_dids"]]
             need_restart = True
