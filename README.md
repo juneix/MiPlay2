@@ -145,18 +145,25 @@ docker run -d \
 
 ![miplay-3.webp](./img/miplay-3.webp)
 
-### 4、uv 直接运行
+### 4、uv 极简本地运行
 
 ```bash
-# 安装 uv
+# 安装 uv 包管理器
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 克隆项目
+# 克隆项目并进入目录
 git clone https://github.com/juneix/MiPlay2.git
 cd MiPlay2
 
-# 启动
-uv run miplay.py
+# 1. 本地极简直接运行 (默认 AirPlay 1 模式)
+uv run miplay
+
+# 2. 本地 Dev 管道运行 (AirPlay 2 模式)
+uv run miplay --dev
+
+# 3. (可选) 全局安装为系统 CLI 命令，之后可在任何目录下直接输入 miplay
+uv tool install .
+miplay
 ```
 
 ## ❤️ 支持项目

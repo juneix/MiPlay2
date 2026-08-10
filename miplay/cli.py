@@ -20,6 +20,8 @@ def parse_args() -> argparse.Namespace:
     serve.add_argument("--host", default="", help="Advertised LAN IP or hostname")
     serve.add_argument("--web-port", type=int, default=0, help="Web UI port")
     serve.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    serve.add_argument("--dev", action="store_true", help="Enable AirPlay 2 Pipe Bridge dev mode")
+    serve.add_argument("--pipe-path", default="/tmp/shairport/audio.fifo", help="Custom FIFO pipe path for Shairport-Sync")
 
     return parser.parse_args()
 
@@ -35,6 +37,12 @@ def main():
     command = args.command or "serve"
     if command != "serve":
         raise SystemExit(f"Unsupported command: {command}")
+
+    import os
+    if args.dev:
+        os.environ["MIPLAY_AIRPLAY2_DEV"] = "1"
+    if args.pipe_path:
+        os.environ["MIPLAY_PIPE_PATH"] = args.pipe_path
 
     config = Config.load(args.conf_path)
     if args.host:

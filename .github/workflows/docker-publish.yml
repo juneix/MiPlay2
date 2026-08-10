@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Image (Latest & Dev)
 
 on:
   push:
@@ -12,7 +12,6 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# 添加权限声明，确保可以推送到 GHCR
 permissions:
   packages: write
   contents: read
@@ -20,65 +19,73 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- 基础纯净版 (latest / main) ---
+          - target_name: "standard"
+            dockerfile: "Dockerfile"
+            tag_suffix: "latest"
+          # --- AirPlay 2 增强版 (dev) ---
+          - target_name: "airplay2-dev"
+            dockerfile: "Dockerfile.dev"
+            tag_suffix: "dev"
+
     steps:
-      # 拉取当前仓库代码
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      # 启用跨架构模拟，支持构建 arm64 镜像
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@v3
 
-      # 初始化 Docker Buildx 多平台构建环境
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v3
 
-      # 登录 GHCR，使用 GitHub 内置令牌推送镜像
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 登录 Docker Hub，使用仓库 Secrets 中的账号信息
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        if: ${{ secrets.DOCKER_USER != '' && secrets.DOCKER_TOKEN != '' }}
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      # 转换仓库拥有者名称为小写（避免 GHCR 报错）
       - name: Lowercase repo owner
         id: lowercase
         run: echo "repo_owner=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
 
-      # 提取元数据，自动生成 latest、版本号、sha 等标签
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: |
-            ghcr.io/${{ steps.lowercase.outputs.repo_owner }}/miplay2
-            ${{ secrets.DOCKER_USER }}/miplay2
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Compute Image Tags
+        id: tags
+        run: |
+          OWNER="${{ steps.lowercase.outputs.repo_owner }}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          SUFFIX="${{ matrix.tag_suffix }}"
+          
+          TAG_GHCR="ghcr.io/${OWNER}/${REPO}:${SUFFIX}"
+          
+          if [ -n "${{ secrets.DOCKER_USER }}" ]; then
+            TAG_DOCKER="${{ secrets.DOCKER_USER }}/${REPO}:${SUFFIX}"
+            echo "final_tags=${TAG_GHCR},${TAG_DOCKER}" >> $GITHUB_OUTPUT
+          else
+            echo "final_tags=${TAG_GHCR}" >> $GITHUB_OUTPUT
+          fi
 
-      # 构建并推送 amd64/arm64 两个平台镜像
-      - name: Build and push
-        uses: docker/build-push-action@v7
+      - name: Build and push (${{ matrix.target_name }})
+        uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
-          platforms: linux/amd64,linux/arm64
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           pull: true
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.tags.outputs.final_tags }}
+          cache-from: type=gha,scope=${{ matrix.target_name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target_name }}
           provenance: false
+
