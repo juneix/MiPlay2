@@ -208,12 +208,17 @@ class BridgeManager:
             if is_dev:
                 # Dev 模式 (AirPlay 2)：由 Shairport-Sync 独占广播 "MiPlay 全屋播放"
                 # 禁用/隐藏 Python AirPlay 1 的 GroupBridge 避免广播重叠冲突
+                from miplay.airplay.audio_stream import AudioStreamServer
                 from miplay.airplay.shairport_bridge import ShairportBridge
+
                 loop = asyncio.get_running_loop()
+                stream_server = AudioStreamServer(self.host, speaker_hardware="GROUP")
+                await stream_server.start()
+
                 self.shairport_bridge = ShairportBridge(
-                    stream_server=group_controller.stream_server,
+                    stream_server=stream_server,
                     on_play_start=lambda: asyncio.run_coroutine_threadsafe(
-                        group_controller.play_url(group_controller.stream_server.stream_url), loop
+                        group_controller.play_url(stream_server.stream_url), loop
                     ),
                     on_play_stop=lambda: asyncio.run_coroutine_threadsafe(
                         group_controller.stop(), loop
@@ -231,6 +236,8 @@ class BridgeManager:
     async def stop(self):
         if self.shairport_bridge:
             try:
+                if hasattr(self.shairport_bridge, "stream_server") and self.shairport_bridge.stream_server:
+                    await self.shairport_bridge.stream_server.stop()
                 await self.shairport_bridge.stop()
             except Exception as exc:
                 log.error(f"Failed to stop shairport bridge: {exc}")
