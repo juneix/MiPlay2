@@ -25,11 +25,11 @@ jobs:
         include:
           # --- 基础纯净版 (latest / main) ---
           - target_name: "standard"
-            dockerfile: "Dockerfile"
+            dockerfile: "docker/Dockerfile"
             tag_suffix: "latest"
           # --- AirPlay 2 增强版 (dev) ---
           - target_name: "airplay2-dev"
-            dockerfile: "Dockerfile.dev"
+            dockerfile: "docker/Dockerfile.dev"
             tag_suffix: "dev"
 
     steps:
@@ -88,4 +88,3 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.target_name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target_name }}
           provenance: false
-

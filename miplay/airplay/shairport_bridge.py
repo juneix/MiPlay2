@@ -34,6 +34,7 @@ _SESSION_BUFFER_MAX = 2 * 1024 * 1024
 _SHAIRPORT_SERVICE = "shairport-sync.service"
 _SERVICE_START_TIMEOUT = 5.0
 _FIFO_READY_TIMEOUT = 2.0
+_READY_SIGNAL = "/tmp/shairport/miplay-ready"
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,7 @@ def update_shairport_conf_name(new_name: str, template_path: str = "shairport-sy
             content = f.read()
         import re
         updated_content, replacements = re.subn(
-            r'(name\s*=\s*")[^"]*(";)',
+            r'(?m)^(\s*name\s*=\s*")[^"]*(";)',
             lambda match: f"{match.group(1)}{new_name}{match.group(2)}",
             content,
             count=1,
@@ -138,6 +139,19 @@ def _service_identity() -> tuple[str, str, int, int]:
     return service_user, service_group, uid, gid
 
 
+def _validate_debian_daemon_args(config_path: str) -> str:
+    defaults_path = "/etc/default/shairport-sync"
+    if not os.path.exists(defaults_path):
+        return ""
+    with open(defaults_path, "r", encoding="utf-8", errors="ignore") as file:
+        lines = [line.strip() for line in file if line.strip() and not line.lstrip().startswith("#")]
+    daemon_args = next((line.split("=", 1)[1].strip().strip('"\'') for line in lines if line.startswith("DAEMON_ARGS=")), "")
+    if "--configfile" in daemon_args or " -c " in f" {daemon_args} ":
+        if config_path not in daemon_args:
+            raise RuntimeError(f"/etc/default/shairport-sync 的 DAEMON_ARGS 指向其它配置: {daemon_args}")
+    return daemon_args
+
+
 def _prepare_fifo(path: str, uid: int, gid: int) -> None:
     if os.path.exists(path):
         if not stat.S_ISFIFO(os.stat(path).st_mode):
@@ -148,9 +162,61 @@ def _prepare_fifo(path: str, uid: int, gid: int) -> None:
     os.chmod(path, 0o660)
 
 
+def _merge_pipe_config(base: str, overlay: str) -> str:
+    """保留系统配置，仅用项目配置替换必要的 pipe/metadata/general 字段。"""
+    import re
+
+    def section(text: str, name: str) -> str:
+        match = re.search(rf"(?ms)^\s*{re.escape(name)}\s*=\s*\{{.*?^\s*\}}\s*;", text)
+        return match.group(0) if match else ""
+
+    def replace_section(text: str, name: str, value: str) -> str:
+        pattern = rf"(?ms)^\s*{re.escape(name)}\s*=\s*\{{.*?^\s*\}}\s*;"
+        if re.search(pattern, text):
+            return re.sub(pattern, value.rstrip() + "\n", text, count=1)
+        return text.rstrip() + "\n\n" + value.rstrip() + "\n"
+
+    general = section(overlay, "general")
+    pipe = section(overlay, "pipe")
+    metadata = section(overlay, "metadata")
+    if not general or not pipe or not metadata:
+        raise RuntimeError("项目 Shairport 配置必须包含 general、pipe、metadata 三个 section")
+    # general 中只取 name/output_backend，避免覆盖系统其它有效选项。
+    name = re.search(r'(?m)^\s*name\s*=\s*"[^"]*"\s*;', general)
+    backend = re.search(r'(?m)^\s*output_backend\s*=\s*"pipe"\s*;', general)
+    current_general = section(base, "general") or "general = {\n};"
+    if name:
+        if re.search(r'(?m)^\s*name\s*=\s*"[^"]*"\s*;', current_general):
+            current_general = re.sub(r'(?m)^\s*name\s*=\s*"[^"]*"\s*;', "    " + name.group(0).strip(), current_general, count=1)
+        else:
+            current_general = current_general.replace("};", "    " + name.group(0).strip() + "\n};", 1)
+    if backend:
+        if re.search(r'(?m)^\s*output_backend\s*=\s*"[^"]*"\s*;', current_general):
+            current_general = re.sub(r'(?m)^\s*output_backend\s*=\s*"[^"]*"\s*;', "    " + backend.group(0).strip(), current_general, count=1)
+        else:
+            current_general = current_general.replace("};", "    " + backend.group(0).strip() + "\n};", 1)
+    return replace_section(
+        replace_section(replace_section(base, "general", current_general), "pipe", pipe),
+        "metadata", metadata,
+    )
+
+
 def _prepare_shairport_env(config_path: str = "/etc/shairport-sync.conf", expected_name: str = "") -> ShairportEnvironment:
-    """同步配置并准备 systemd Shairport-Sync 使用的 FIFO。"""
-    service_user, service_group, service_uid, service_gid = _service_identity()
+    """同步配置并准备 Shairport-Sync 使用的 FIFO。"""
+    container_mode = os.environ.get("MIPLAY_SHAIRPORT_MODE") == "container"
+    if container_mode:
+        try:
+            service_record = pwd.getpwnam("shairport-sync")
+            service_group_record = grp.getgrnam("shairport-sync")
+            service_uid, service_gid = service_record.pw_uid, service_group_record.gr_gid
+        except KeyError:
+            service_uid, service_gid = os.getuid(), os.getgid()
+        service_user, service_group = "shairport-sync", "shairport-sync"
+    else:
+        service_user, service_group, service_uid, service_gid = _service_identity()
+        daemon_args = _validate_debian_daemon_args(config_path)
+        if daemon_args:
+            log.info("[AirPlay] systemd DAEMON_ARGS: %s", daemon_args)
     os.makedirs("/tmp/shairport", exist_ok=True)
     os.chmod("/tmp/shairport", 0o755)
     os.chown("/tmp/shairport", service_uid, service_gid)
@@ -195,13 +261,14 @@ def _prepare_shairport_env(config_path: str = "/etc/shairport-sync.conf", expect
                 current_content = f.read()
         except FileNotFoundError:
             current_content = ""
-        if current_content.strip() != expected_conf.strip():
+        merged_content = _merge_pipe_config(current_content, expected_conf) if current_content.strip() else expected_conf
+        if current_content.strip() != merged_content.strip():
             bak_path = config_path + ".bak"
             if os.path.exists(config_path) and not os.path.exists(bak_path):
                 import shutil
                 shutil.copy2(config_path, bak_path)
             with open(config_path, "w", encoding="utf-8") as f:
-                f.write(expected_conf)
+                f.write(merged_content)
             config_changed = True
             log.info("[AirPlay] 已同步更新 %s", config_path)
     except PermissionError as exc:
@@ -476,14 +543,26 @@ class ShairportBridge:
                 ),
                 timeout=_FIFO_READY_TIMEOUT,
             )
-            pid = await asyncio.to_thread(restart_shairport_service)
-            self._service_alive = True
-            self._service_task = asyncio.create_task(self._monitor_service())
-            log.info(
-                "[AirPlay] systemd Shairport-Sync 接管成功 "
-                "(PID: %d, User: %s, Group: %s, config_changed=%s)",
-                pid, env.service_user, env.service_group, env.config_changed,
-            )
+            if os.environ.get("MIPLAY_SHAIRPORT_MODE") == "container":
+                await asyncio.to_thread(lambda: open(_READY_SIGNAL, "w").close())
+                pid = 0
+                self._service_alive = True
+            else:
+                pid = await asyncio.to_thread(restart_shairport_service)
+                self._service_alive = True
+                self._service_task = asyncio.create_task(self._monitor_service())
+            if os.environ.get("MIPLAY_SHAIRPORT_MODE") == "container":
+                log.info(
+                    "[AirPlay] Docker FIFO reader 已就绪 "
+                    "(User: %s, Group: %s, config_changed=%s)",
+                    env.service_user, env.service_group, env.config_changed,
+                )
+            else:
+                log.info(
+                    "[AirPlay] systemd Shairport-Sync 接管成功 "
+                    "(PID: %d, User: %s, Group: %s, config_changed=%s)",
+                    pid, env.service_user, env.service_group, env.config_changed,
+                )
             log.info("Started ShairportBridge on pipe %s", self.pipe_path)
         except Exception as exc:
             self._running = False

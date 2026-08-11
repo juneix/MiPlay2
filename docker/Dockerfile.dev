@@ -38,11 +38,13 @@ COPY --from=builder /app/deps /app/deps
 COPY miplay/ ./miplay/
 COPY miplay.py ./
 COPY shairport-sync.conf ./
+COPY docker/miplay-dev.sh /usr/local/bin/miplay-dev.sh
 
 # 创建配置与管道目录
-RUN mkdir -p /app/conf /tmp/shairport
+RUN mkdir -p /app/conf /tmp/shairport && chmod +x /usr/local/bin/miplay-dev.sh
 
 EXPOSE 8820 53540-53550 7000 5000
 
 # 容器启动脚本：后台拉起 nqptp 与 shairport-sync (由 Python 自动同步/etc/shairport-sync.conf)，随后启动 MiPlay
-CMD ["sh", "-c", "nqptp & shairport-sync & python miplay.py"]
+ENV MIPLAY_SHAIRPORT_MODE=container
+ENTRYPOINT ["/usr/local/bin/miplay-dev.sh"]
