@@ -130,7 +130,7 @@ class AudioStreamServer:
         self._site = web.TCPSite(self._runner, "0.0.0.0", self.port)
         await self._site.start()
         self.port = self._site._server.sockets[0].getsockname()[1]
-        log.info(f"AirPlay 音频流服务器: http://{self.hostname}:{self.port} (格式: {self._audio_format})")
+        log.info(f"[Audio] HTTP 流服务器: http://{self.hostname}:{self.port} (格式: {self._audio_format})")
 
     async def stop(self):
         self._active = False
@@ -207,7 +207,7 @@ class AudioStreamServer:
         if not self._broadcaster or not self._broadcaster.is_alive():
             self._broadcaster = threading.Thread(target=self._broadcaster_loop, daemon=True)
             self._broadcaster.start()
-        log.info("音频流: 开始接收 PCM 数据 (格式: %s)", self._pcm_format.describe())
+        log.info("[Audio] 开始接收 PCM 数据 (格式: %s)", self._pcm_format.describe())
 
     def stop_streaming(self):
         self._active = False
@@ -227,7 +227,7 @@ class AudioStreamServer:
                     q.put_nowait(None)
                 except queue.Full:
                     pass
-        log.info("音频流: 停止接收 PCM 数据")
+        log.info("[Audio] 停止接收 PCM 数据")
 
     def write_pcm(self, data: bytes, *, bootstrap: bool = False):
         """写入 PCM 音频数据 — 非阻塞写入主缓冲区并自动广播"""
@@ -302,7 +302,7 @@ class AudioStreamServer:
         self._abort = False  # 重置中断标志，允许续播
         session_format = self._pcm_format
 
-        log.info("AirPlay: 音箱开始拉取 WAV 音频流 (零编码延迟)")
+        log.info("[Audio] 音箱开始拉取 WAV 音频流 (零编码延迟)")
 
         # 使用 asyncio.Event 在写入线程和事件循环间通信
         loop = asyncio.get_event_loop()
@@ -367,7 +367,7 @@ class AudioStreamServer:
                     # 批量写入：合并所有 chunk 一次性写出
                     await response.write(b"".join(chunks))
         except (ConnectionResetError, BrokenPipeError):
-            log.info("AirPlay: 音箱断开 WAV 音频流连接")
+            log.info("[Audio] 音箱断开 WAV 音频流连接")
         except Exception as e:
             pass
         finally:
@@ -378,7 +378,7 @@ class AudioStreamServer:
             await response.write_eof()
         except Exception:
             pass
-        log.info("AirPlay: WAV 音频流结束")
+        log.info("[Audio] WAV 音频流结束")
         return response
 
     # ============================================================
@@ -408,7 +408,7 @@ class AudioStreamServer:
         client_queue = self._create_client_queue()
         self._abort = False  # 重置中断标志，允许续播
 
-        log.info("AirPlay: 音箱开始拉取 MP3 音频流")
+        log.info("[Audio] 音箱开始拉取 MP3 音频流")
 
         import os
         ffmpeg_bin = "ffmpeg"
@@ -446,7 +446,7 @@ class AudioStreamServer:
                 bufsize=0,
             )
         except FileNotFoundError:
-            log.error("ffmpeg 未找到，无法转码音频流")
+            log.error("[Audio] ffmpeg 未找到，无法转码音频流")
             self._remove_client_queue(client_queue)
             await response.write_eof()
             return response
@@ -513,7 +513,7 @@ class AudioStreamServer:
                     break
                 await response.write(audio_data)
         except (ConnectionResetError, BrokenPipeError):
-            log.info("AirPlay: 音箱断开 MP3 音频流连接")
+            log.info("[Audio] 音箱断开 MP3 音频流连接")
         except Exception as e:
             pass
         finally:
@@ -533,5 +533,5 @@ class AudioStreamServer:
             await response.write_eof()
         except Exception:
             pass
-        log.info("AirPlay: MP3 音频流结束")
+        log.info("[Audio] MP3 音频流结束")
         return response

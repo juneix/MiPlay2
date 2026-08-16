@@ -59,9 +59,7 @@ def main():
     main_task = loop.create_task(app.run_forever())
 
     def shutdown():
-        import os
-        # 粗暴退出，防止 zeroconf 注销死锁导致卡死
-        os._exit(0)
+        main_task.cancel()
 
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGINT, shutdown)

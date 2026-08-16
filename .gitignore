@@ -10,6 +10,7 @@ __pycache__/
 .vscode/
 .agents/
 .idea/
+.claude/
 .mimocode/
 docs/
 

@@ -6,7 +6,6 @@
 
 import asyncio
 import base64
-import ipaddress
 import logging
 import os
 import socket
@@ -24,6 +23,7 @@ from Crypto.Cipher import AES
 from miplay.airplay.audio_stream import AudioStreamServer
 from miplay.airplay.mdns import AirPlayMDNS
 from miplay.airplay.playfair import PlayFair
+from miplay.airplay.utils import resolve_advertise_ip
 
 log = logging.getLogger("miplay")
 
@@ -55,30 +55,7 @@ AIRPORT_PRIVATE_KEY = (
 )
 
 
-def _resolve_advertise_ip(hostname: str) -> str:
-    """优先使用配置中的局域网 IP，避免误用 tun/虚拟网卡地址。"""
-    try:
-        ipaddress.ip_address(hostname)
-        if hostname not in {"0.0.0.0", "127.0.0.1"}:
-            return hostname
-    except ValueError:
-        pass
 
-    try:
-        resolved = socket.gethostbyname(hostname)
-        if resolved not in {"0.0.0.0", "127.0.0.1"}:
-            return resolved
-    except OSError:
-        pass
-
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
 
 
 class AP1Security:
@@ -145,7 +122,7 @@ class AirPlayServer:
         self.device_name = device_name
         self.speaker_hardware = speaker_hardware
         self.device_id = self._generate_device_id()
-        self.ipv4 = _resolve_advertise_ip(hostname)
+        self.ipv4 = resolve_advertise_ip(hostname)
 
         # RTSP 服务器
         self.rtsp_port = 0
@@ -253,9 +230,9 @@ class AirPlayServer:
         self._rtsp_thread = threading.Thread(target=self._rtsp_loop, daemon=True)
         self._rtsp_thread.start()
 
-        log.info(f"AirPlay 服务已启动: {self.device_name}")
-        log.info(f"  RTSP 端口: {self.rtsp_port}")
-        log.info(f"  音频流: {self._stream_server.stream_url}")
+        log.info(f"[AirPlay] 服务已启动: {self.device_name}")
+        log.info(f"[AirPlay]   RTSP 端口: {self.rtsp_port}")
+        log.info(f"[AirPlay]   音频流: {self._stream_server.stream_url}")
 
     async def stop(self):
         """停止 AirPlay 服务"""
@@ -264,7 +241,7 @@ class AirPlayServer:
             self._rtsp_socket.close()
         self._mdns.stop()
         await self._stream_server.stop()
-        log.info("AirPlay 服务已停止")
+        log.info("[AirPlay] 服务已停止")
 
     def _rtsp_loop(self):
         """RTSP 主循环"""
@@ -280,7 +257,7 @@ class AirPlayServer:
             except OSError:
                 break
             except Exception as e:
-                log.error(f"RTSP accept error: {e}")
+                log.error(f"[AirPlay] RTSP accept error: {e}")
 
     def _safe_call_on_play_stop(self):
         """线程安全地调用 on_play_stop 回调
@@ -297,11 +274,11 @@ class AirPlayServer:
             else:
                 self.on_play_stop()
         except Exception as e:
-            log.error(f"on_play_stop error: {e}")
+            log.error(f"[AirPlay] on_play_stop error: {e}")
 
     def _handle_rtsp_client(self, sock: socket.socket, addr: tuple):
         """处理 RTSP 客户端连接"""
-        log.info(f"AirPlay 客户端连接: {addr}")
+        log.info(f"[AirPlay] 客户端连接: {addr}")
         session_active = False
         rtp_socket = None
         rtp_thread = None
@@ -319,7 +296,7 @@ class AirPlayServer:
                 while b"\r\n\r\n" not in data:
                     chunk = sock.recv(4096)
                     if not chunk:
-                        log.info(f"AirPlay 客户端关闭连接: {addr}")
+                        log.info(f"[AirPlay] 客户端关闭连接: {addr}")
                         return
                     data += chunk
 
@@ -328,13 +305,13 @@ class AirPlayServer:
                 body = data[header_end + 4:]
 
                 if not header_lines:
-                    log.warning(f"RTSP 空请求头")
+                    log.warning(f"[AirPlay] RTSP 空请求头")
                     continue
 
                 request_line = header_lines[0]
                 parts = request_line.split()
                 if len(parts) < 3:
-                    log.warning(f"RTSP 无效请求行: {request_line}")
+                    log.warning(f"[AirPlay] RTSP 无效请求行: {request_line}")
                     continue
 
                 method = parts[0]
@@ -361,14 +338,14 @@ class AirPlayServer:
                     while len(body) < content_length:
                         chunk = sock.recv(4096)
                         if not chunk:
-                            log.info(f"AirPlay 客户端关闭连接: {addr}")
+                            log.info(f"[AirPlay] 客户端关闭连接: {addr}")
                             return
                         body += chunk
                     body = body[:content_length]
 
                 cseq = headers.get("CSeq", "0")
                 if method != "OPTIONS":
-                    log.info(f"RTSP {method} {path} CSeq={cseq} body={len(body)} bytes")
+                    log.info(f"[AirPlay] RTSP {method} {path} CSeq={cseq} body={len(body)} bytes")
                 else:
                     log.debug(f"RTSP {method} {path} CSeq={cseq} body={len(body)} bytes")
 
@@ -432,7 +409,7 @@ class AirPlayServer:
                     break
 
                 elif method == "FLUSH":
-                    log.info("RTSP FLUSH: 清空音频缓冲区")
+                    log.info("[AirPlay] RTSP FLUSH: 清空音频缓冲区")
                     # 仅清空队列，不停止流服务器，避免断开客户端
                     self._stream_server.start_streaming() 
                     self._send_rtsp_response(sock, 200, cseq)
@@ -447,14 +424,14 @@ class AirPlayServer:
 
                 elif method == "SET_PARAMETER":
                     content_type = headers.get("Content-Type", "")
-                    log.info(f"SET_PARAMETER: Content-Type={content_type}, body size={len(body)}")
+                    log.info(f"[AirPlay] SET_PARAMETER: Content-Type={content_type}, body size={len(body)}")
                     
                     if content_type == "application/x-dmap-tagged":
                         # 解析元数据 (DACP/DMAP)
                         try:
                             from miplay.airplay.dxxp import parse_dxxp
                             metadata_str = parse_dxxp(body)
-                            log.info(f"AirPlay 元数据更新:\n{metadata_str}")
+                            log.info(f"[Audio] 元数据更新:\n{metadata_str}")
                             
                             # 将解析出的字符串转换为字典
                             new_meta = {}
@@ -472,9 +449,9 @@ class AirPlayServer:
                             
                             if new_meta:
                                 self._metadata = new_meta
-                                log.info(f"识别到歌曲信息: {new_meta}")
+                                log.info(f"[Audio] 识别到歌曲信息: {new_meta}")
                         except Exception as e:
-                            log.error(f"解析元数据失败: {e}")
+                            log.error(f"[Audio] 解析元数据失败: {e}")
                             
                     elif content_type.startswith("image/"):
                         # 解析封面图片
@@ -482,9 +459,9 @@ class AirPlayServer:
                             import base64
                             img_b64 = base64.b64encode(body).decode("utf-8")
                             self._artwork = f"data:{content_type};base64,{img_b64}"
-                            log.info(f"AirPlay 封面更新: {len(body)} 字节")
+                            log.info(f"[Audio] 封面更新: {len(body)} 字节")
                         except Exception as e:
-                            log.error(f"处理封面失败: {e}")
+                            log.error(f"[Audio] 处理封面失败: {e}")
                             
                     elif content_type == "text/parameters":
                         body_str = body.decode("utf-8", errors="replace")
@@ -494,11 +471,11 @@ class AirPlayServer:
                                 vol_str = body_str.split("volume:")[1].strip().split("\r\n")[0]
                                 vol_db = float(vol_str)
                                 self._last_volume_db = vol_db
-                                log.info(f"AirPlay 调节音量: {vol_db} dB")
+                                log.info(f"[Audio] 调节音量: {vol_db} dB")
                                 if self.on_volume_change:
                                     self.on_volume_change(vol_db)
                             except Exception as e:
-                                log.error(f"解析音量失败: {e}")
+                                log.error(f"[Audio] 解析音量失败: {e}")
                     
                     self._send_rtsp_response(sock, 200, cseq)
 
@@ -509,17 +486,17 @@ class AirPlayServer:
                     self._handle_fp_setup(sock, body, cseq)
 
                 elif method == "POST":
-                    log.info(f"未处理的 POST 路径: {path}")
+                    log.info(f"[AirPlay] 未处理的 POST 路径: {path}")
                     self._send_rtsp_response(sock, 200, cseq)
 
                 else:
-                    log.info(f"未处理的 RTSP 方法: {method} {path}")
+                    log.info(f"[AirPlay] 未处理的 RTSP 方法: {method} {path}")
                     self._send_rtsp_response(sock, 200, cseq)
 
         except socket.timeout:
-            log.warning(f"RTSP 客户端超时: {addr}")
+            log.warning(f"[AirPlay] RTSP 客户端超时: {addr}")
         except Exception as e:
-            log.error(f"RTSP handler error: {e}")
+            log.error(f"[AirPlay] RTSP handler error: {e}")
         finally:
             # 无论正常 TEARDOWN 还是异常断开，都要重置播放状态
             self._is_playing = False
@@ -534,7 +511,7 @@ class AirPlayServer:
                     except Exception:
                         pass
             sock.close()
-            log.info(f"AirPlay 客户端断开: {addr}")
+            log.info(f"[AirPlay] 客户端断开: {addr}")
             # 异常断开时触发 on_play_stop 回调（TEARDOWN 已触发过则跳过）
             if not teardown_done:
                 self._safe_call_on_play_stop()
@@ -546,28 +523,28 @@ class AirPlayServer:
         - 第一轮 (seq=1): 16 字节请求，返回 142 字节响应
         - 第二轮 (seq=3): 164 字节请求，返回 32 字节响应
         """
-        log.info(f"FairPlay setup: 收到 {len(body)} 字节")
+        log.info(f"[AirPlay] FairPlay setup: 收到 {len(body)} 字节")
 
         if len(body) < 16:
-            log.warning(f"FairPlay 请求太短: {len(body)} 字节")
+            log.warning(f"[AirPlay] FairPlay 请求太短: {len(body)} 字节")
             self._send_rtsp_response(sock, 400, cseq)
             return
         if len(body) == 164:
             self._fp_keymsg = body
-            log.info("保存 FairPlay keymsg (164 字节)")
+            log.info("[AirPlay] 保存 FairPlay keymsg (164 字节)")
 
         try:
             response = self._playfair.fairplay_setup(self._fp_state, body)
             if response:
-                log.info(f"FairPlay setup 响应: {len(response)} 字节")
+                log.info(f"[AirPlay] FairPlay setup 响应: {len(response)} 字节")
                 # 发送带二进制内容的 RTSP 响应
                 self._send_rtsp_binary_response(sock, 200, cseq, response,
                                                  "application/octet-stream")
             else:
-                log.warning("FairPlay setup 未能生成响应")
+                log.warning("[AirPlay] FairPlay setup 未能生成响应")
                 self._send_rtsp_response(sock, 200, cseq)
         except Exception as e:
-            log.error(f"FairPlay setup 错误: {e}")
+            log.error(f"[AirPlay] FairPlay setup 错误: {e}")
             import traceback
             log.error(traceback.format_exc())
             self._send_rtsp_response(sock, 500, cseq)
@@ -588,8 +565,8 @@ class AirPlayServer:
     def _handle_announce(self, sock: socket.socket, headers: dict, body: bytes, cseq: str):
         """处理 ANNOUNCE 请求 - 解析 SDP"""
         sdp = body.decode("utf-8", errors="replace")
-        log.info(f"ANNOUNCE SDP:\n{sdp}")
-        log.info(f"ANNOUNCE headers: {headers}")
+        log.info(f"[AirPlay] ANNOUNCE SDP:\n{sdp}")
+        log.info(f"[AirPlay] ANNOUNCE headers: {headers}")
 
         # 解析 SDP 提取音频参数
         self._sample_rate = 44100
@@ -609,27 +586,27 @@ class AirPlayServer:
                 name = line[2:].strip()
                 if name:
                     self._client_name = name
-                    log.info(f"从 SDP 中识别到客户端名称: {self._client_name}")
+                    log.info(f"[AirPlay] 从 SDP 中识别到客户端名称: {self._client_name}")
 
             if line.startswith("a=rtpmap:"):
                 # 例如: a=rtpmap:96 AppleLossless
                 parts = line.split()
-                log.info(f"Found rtpmap: {parts}")
+                log.info(f"[AirPlay] Found rtpmap: {parts}")
                 if len(parts) >= 2:
                     fmt = parts[1]
                     if "AppleLossless" in fmt:
                         self._audio_format = 0x2  # ALAC
-                        log.info(f"识别到 ALAC 格式")
+                        log.info(f"[Audio] 识别到 ALAC 格式")
                     elif "mpeg4-generic" in fmt:
                         self._audio_format = 0x4  # AAC
-                        log.info(f"识别到 AAC 格式")
+                        log.info(f"[Audio] 识别到 AAC 格式")
                     elif "L16" in fmt or "PCM" in fmt:
                         self._audio_format = 0x1  # PCM
-                        log.info(f"识别到 PCM 格式")
+                        log.info(f"[Audio] 识别到 PCM 格式")
             elif line.startswith("a=fmtp:"):
                 # ALAC fmtp: a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100
                 parts = line.split()
-                log.info(f"Found fmtp: {parts}")
+                log.info(f"[AirPlay] Found fmtp: {parts}")
                 self._fmtp_params = parts[1:]  # 保存完整 fmtp 参数（去掉 payload type）
                 if len(parts) >= 12:
                     try:
@@ -653,22 +630,22 @@ class AirPlayServer:
                 iv_data += "=" * (4 - len(iv_data) % 4) if len(iv_data) % 4 else ""
                 aes_iv = base64.b64decode(iv_data)
 
-        log.info(f"解析结果: audio_format={self._audio_format}, sr={self._sample_rate}, ch={self._channels}")
+        log.info(f"[AirPlay] 解析结果: audio_format={self._audio_format}, sr={self._sample_rate}, ch={self._channels}")
 
         if aes_key and aes_iv:
             if aes_key_type == "rsa":
                 # 解密 RSA AES 密钥
                 self._session_key = self._decrypt_rsa_aes_key(aes_key)
-                log.info(f"音频加密已启用 (RSA)")
+                log.info(f"[AirPlay] 音频加密已启用 (RSA)")
             else:
                 # 解密 FairPlay AES 密钥
                 try:
                     from miplay.airplay.playfair import FairPlayAES
                     fp_aes = FairPlayAES(fpaeskey=aes_key, aesiv=aes_iv, keymsg=self._fp_keymsg)
                     self._session_key = fp_aes.aeskey
-                    log.info(f"音频加密已启用 (FairPlay)")
+                    log.info(f"[AirPlay] 音频加密已启用 (FairPlay)")
                 except ImportError as e:
-                    log.error(f"无法加载 FairPlay 解密模块 (ap2): {e}")
+                    log.error(f"[AirPlay] 无法加载 FairPlay 解密模块 (ap2): {e}")
                     # 如果缺少 ap2，尝试使用 fp_decrypt 中的逻辑或其他 fallback
                     self._session_key = None
             
@@ -676,7 +653,7 @@ class AirPlayServer:
         else:
             self._session_key = None
             self._session_iv = None
-            log.info(f"音频未加密")
+            log.info(f"[AirPlay] 音频未加密")
 
         # 初始化音频解码器
         self._init_decoder()
@@ -694,7 +671,7 @@ class AirPlayServer:
             decrypted = cipher.decrypt(encrypted_key)
             return decrypted[:16]
         except Exception as e:
-            log.error(f"RSA 解密 AES 密钥失败: {e}")
+            log.error(f"[AirPlay] RSA 解密 AES 密钥失败: {e}")
             return b"\x00" * 16
 
     def _init_decoder(self):
@@ -743,7 +720,7 @@ class AirPlayServer:
                         )
                         self._codec_context.extradata = extradata
                     except (ValueError, IndexError, struct.error) as e:
-                        log.warning(f"ALAC extradata 构建失败: {e}")
+                        log.warning(f"[Audio] ALAC extradata 构建失败: {e}")
                         extradata = struct.pack(
                             ">I4sIIBBBBBBHIII",
                             36, b"alac", 0,
@@ -779,9 +756,9 @@ class AirPlayServer:
             )
 
             self._stream_server.set_audio_params(self._sample_rate, self._channels, 2)
-            log.info(f"音频解码器初始化: fmt={self._audio_format}, sr={self._sample_rate}, ch={self._channels}, bits={bitdepth}")
+            log.info(f"[Audio] 解码器初始化: fmt={self._audio_format}, sr={self._sample_rate}, ch={self._channels}, bits={bitdepth}")
         except Exception as e:
-            log.error(f"解码器初始化失败: {e}")
+            log.error(f"[Audio] 解码器初始化失败: {e}")
             import traceback
             log.error(traceback.format_exc())
 
@@ -795,7 +772,7 @@ class AirPlayServer:
         - timing_port: 接收/发送 NTP timing 包
         """
         transport = headers.get("Transport", "")
-        log.info(f"SETUP Transport: {transport}")
+        log.info(f"[AirPlay] SETUP Transport: {transport}")
 
         # 创建 RTP 接收 socket (server_port - 音频数据)
         rtp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -844,7 +821,7 @@ class AirPlayServer:
             f"timing_port={timing_port}"
         )
 
-        log.info(f"SETUP 响应: server_port={server_port}, control_port={control_port}, timing_port={timing_port}")
+        log.info(f"[AirPlay] SETUP 响应: server_port={server_port}, control_port={control_port}, timing_port={timing_port}")
 
         self._send_rtsp_response(sock, 200, cseq, {
             "Transport": transport_response,
@@ -856,7 +833,7 @@ class AirPlayServer:
 
     def _rtcp_loop(self, rtcp_socket: socket.socket):
         """RTCP 控制包接收循环"""
-        log.info("RTCP 线程启动")
+        log.info("[AirPlay] RTCP 线程启动")
         try:
             while self._running:
                 try:
@@ -879,7 +856,7 @@ class AirPlayServer:
             pass
         finally:
             rtcp_socket.close()
-            log.info("RTCP 线程已停止")
+            log.info("[AirPlay] RTCP 线程已停止")
 
     def _handle_record(self, sock: socket.socket, cseq: str):
         """处理 RECORD 请求 - 开始播放"""
@@ -889,7 +866,7 @@ class AirPlayServer:
             try:
                 self.on_play_start(self._stream_server.stream_url)
             except Exception as e:
-                log.error(f"on_play_start error: {e}")
+                log.error(f"[AirPlay] on_play_start error: {e}")
 
         self._send_rtsp_response(sock, 200, cseq, {
             "Audio-Latency": "0",
@@ -903,7 +880,7 @@ class AirPlayServer:
         响应: 0x80 0x53 (type=0x53=83 即 TIME_RESPONSE) + seq(2) + ref_time(8) + recv_time(8) + send_time(8)
         共 32 字节
         """
-        log.info("Timing 线程启动")
+        log.info("[AirPlay] Timing 线程启动")
         try:
             while self._running:
                 try:
@@ -952,7 +929,7 @@ class AirPlayServer:
 
     def _rtp_receive_loop(self, rtp_socket: socket.socket):
         """RTP 音频数据接收循环"""
-        log.info("RTP 接收线程启动")
+        log.info("[AirPlay] RTP 接收线程启动")
 
         # 等待流媒体激活
         wait_count = 0
@@ -961,11 +938,11 @@ class AirPlayServer:
             wait_count += 1
 
         if not self._stream_server._active:
-            log.warning("RTP: 流媒体未激活，退出接收线程")
+            log.warning("[AirPlay] RTP: 流媒体未激活，退出接收线程")
             rtp_socket.close()
             return
 
-        log.info("RTP: 开始接收音频数据")
+        log.info("[AirPlay] RTP: 开始接收音频数据")
         packet_count = 0
         error_count = 0
         last_seq = 0
@@ -991,7 +968,7 @@ class AirPlayServer:
                     # 初始对齐 next_seq
                     if next_seq == -1:
                         next_seq = seq
-                        log.info(f"RTP: 初始序列号 {next_seq}")
+                        log.info(f"[AirPlay] RTP: 初始序列号 {next_seq}")
 
                     # 将原始 payload 放入抖动缓冲区
                     jitter_buffer[seq] = payload
@@ -1036,9 +1013,9 @@ class AirPlayServer:
                             else:
                                 error_count += 1
                                 if error_count == 1 or error_count % 100 == 0:
-                                    log.warning(f"RTP: 解码失败 (seq={next_seq}, len={len(ordered_payload)}), 连续失败 {error_count} 次")
+                                    log.warning(f"[Audio] RTP: 解码失败 (seq={next_seq}, len={len(ordered_payload)}), 连续失败 {error_count} 次")
                                     # 打印前 16 字节的十六进制，帮助分析是否未正确解密
-                                    log.warning(f"RTP: 数据前16字节 (hex): {ordered_payload[:16].hex()}")
+                                    log.warning(f"[Audio] RTP: 数据前16字节 (hex): {ordered_payload[:16].hex()}")
 
                             last_seq = next_seq
                             next_seq = (next_seq + 1) & 0xFFFF
@@ -1065,12 +1042,12 @@ class AirPlayServer:
                     break
 
         except Exception as e:
-            log.error(f"RTP 接收错误: {e}")
+            log.error(f"[AirPlay] RTP 接收错误: {e}")
             import traceback
             log.error(traceback.format_exc())
         finally:
             rtp_socket.close()
-            log.info(f"RTP 接收线程结束，共接收 {packet_count} 个包，最后 seq={last_seq}")
+            log.info(f"[AirPlay] RTP 接收线程结束，共接收 {packet_count} 个包，最后 seq={last_seq}")
 
     def _decode_audio(self, data: bytes) -> bytes | None:
         """解码音频数据为 PCM"""
@@ -1098,7 +1075,7 @@ class AirPlayServer:
                     parts.append(bytes(mv[:resampled.samples * ch2]))
             return b"".join(parts) if parts else None
         except Exception as e:
-            log.error(f"ALAC 解码异常: {e}")
+            log.error(f"[Audio] ALAC 解码异常: {e}")
             # 解码失败时返回静音数据，避免音频流中断
             # 返回 10ms 静音数据
             silence_len = self._sample_rate * self._channels * 2 // 100

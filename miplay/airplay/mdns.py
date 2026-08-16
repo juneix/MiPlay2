@@ -5,7 +5,6 @@
 """
 
 import logging
-import ipaddress
 import socket
 import threading
 import time
@@ -13,33 +12,12 @@ import time
 from zeroconf import ServiceInfo, Zeroconf, IPVersion
 from zeroconf._exceptions import ServiceNameAlreadyRegistered, NonUniqueNameException
 
+from miplay.airplay.utils import resolve_advertise_ip
+
 log = logging.getLogger("miplay")
 
 
-def _resolve_advertise_ip(hostname: str) -> str:
-    """优先使用配置中的局域网 IP，避免误用 tun/虚拟网卡地址。"""
-    try:
-        ipaddress.ip_address(hostname)
-        if hostname not in {"0.0.0.0", "127.0.0.1"}:
-            return hostname
-    except ValueError:
-        pass
 
-    try:
-        resolved = socket.gethostbyname(hostname)
-        if resolved not in {"0.0.0.0", "127.0.0.1"}:
-            return resolved
-    except OSError:
-        pass
-
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
 
 
 class AirPlayMDNS:
@@ -67,18 +45,18 @@ class AirPlayMDNS:
         """在独立线程中运行 mDNS"""
         try:
             # 获取本机 IP 地址
-            ip = _resolve_advertise_ip(self.hostname)
+            ip = resolve_advertise_ip(self.hostname)
             ip_bytes = socket.inet_aton(ip)
 
-            log.info(f"AirPlay mDNS 启动中，IP: {ip}:{self.rtsp_port}")
+            log.info(f"[AirPlay] mDNS 启动中，IP: {ip}:{self.rtsp_port}")
 
             # 使用共享的 zeroconf 或创建新的
             if self.shared_zeroconf:
                 self.zeroconf = self.shared_zeroconf
-                log.info("使用共享 Zeroconf 实例")
+                log.info("[AirPlay] 使用共享 Zeroconf 实例")
             else:
                 self.zeroconf = Zeroconf(ip_version=IPVersion.All)
-                log.info("创建新的 Zeroconf 实例")
+                log.info("[AirPlay] 创建新的 Zeroconf 实例")
 
             # 构建设备 ID (去掉冒号的 MAC 地址格式，用于 RAOP 服务名)
             device_id_clean = self.device_id.replace(":", "")
@@ -172,19 +150,19 @@ class AirPlayMDNS:
             for attempt in range(3):
                 try:
                     self.zeroconf.register_service(self.raop_info, allow_name_change=True)
-                    log.info(f"RAOP 服务已注册: {device_id_clean}@{self.device_name}._raop._tcp.local.")
+                    log.info(f"[AirPlay] RAOP 服务已注册: {device_id_clean}@{self.device_name}._raop._tcp.local.")
                     
                     try:
                         self.zeroconf.register_service(self.airplay_info, allow_name_change=True)
-                        log.info(f"AirPlay 服务已注册: {self.device_name}._airplay._tcp.local.")
+                        log.info(f"[AirPlay] 服务已注册: {self.device_name}._airplay._tcp.local.")
                     except Exception as e:
-                        log.warning(f"AirPlay 服务 (_airplay._tcp) 注册失败: {e}")
+                        log.warning(f"[AirPlay] 服务 (_airplay._tcp) 注册失败: {e}")
                         
                     registered = True
                     break
                 except (ServiceNameAlreadyRegistered, NonUniqueNameException) as e:
                     if attempt < 2:
-                        log.warning(f"RAOP 服务名冲突 ({type(e).__name__})，等待 2 秒后重试 ({attempt+1}/3)...")
+                        log.warning(f"[AirPlay] RAOP 服务名冲突 ({type(e).__name__})，等待 2 秒后重试 ({attempt+1}/3)...")
                         # 旧进程重启时 zeroconf 可能还未清理，等待旧服务超时
                         try:
                             self.zeroconf.unregister_all_services()
@@ -194,20 +172,20 @@ class AirPlayMDNS:
                     else:
                         raise
             if not registered:
-                log.error(f"RAOP 服务注册失败: {device_id_clean}@{self.device_name}._raop._tcp.local.")
+                log.error(f"[AirPlay] RAOP 服务注册失败: {device_id_clean}@{self.device_name}._raop._tcp.local.")
                 return
 
-            log.info(f"AirPlay 音频接收器 mDNS 广播已启动")
-            log.info(f"  设备名称: {self.device_name}")
-            log.info(f"  设备 ID: {self.device_id}")
-            log.info(f"  RTSP 端口: {self.rtsp_port}")
+            log.info(f"[AirPlay] mDNS 广播已启动")
+            log.info(f"[AirPlay]   设备名称: {self.device_name}")
+            log.info(f"[AirPlay]   设备 ID: {self.device_id}")
+            log.info(f"[AirPlay]   RTSP 端口: {self.rtsp_port}")
 
             # 保持线程运行
             while self._running:
                 time.sleep(1)
 
         except Exception as e:
-            log.error(f"启动 AirPlay mDNS 失败: {e}")
+            log.error(f"[AirPlay] 启动 mDNS 失败: {e}")
             import traceback
             log.error(traceback.format_exc())
 
@@ -219,9 +197,16 @@ class AirPlayMDNS:
                 try:
                     if self.zeroconf and not self.zeroconf.loop.is_closed():
                         self.zeroconf.unregister_service(self.raop_info)
-                        log.info(f"RAOP 服务已注销: {self.device_name}")
+                        log.info(f"[AirPlay] RAOP 服务已注销: {self.device_name}")
                 except Exception as e:
-                    log.error(f"注销 mDNS 服务失败: {e}")
+                    log.error(f"[AirPlay] 注销 RAOP 服务失败: {e}")
+            if self.airplay_info:
+                try:
+                    if self.zeroconf and not self.zeroconf.loop.is_closed():
+                        self.zeroconf.unregister_service(self.airplay_info)
+                        log.info(f"[AirPlay] 服务已注销: {self.device_name}")
+                except Exception as e:
+                    log.error(f"[AirPlay] 注销 AirPlay 服务失败: {e}")
         # 注意：不关闭共享的 zeroconf，只关闭自己创建的
         if self.zeroconf and not self.shared_zeroconf:
             try:
