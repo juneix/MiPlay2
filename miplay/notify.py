@@ -41,7 +41,7 @@ class Notifier:
             ) as session:
                 async with session.post(url, data={"title": title, "desp": content}) as resp:
                     if resp.status == 200:
-                        log.info("[Notify] ServerChan 推送成功: %s", title)
+                        log.info("[Notify] ServerChan 推送成功: %s | %s", title, content)
                         return True
                     log.warning("[Notify] ServerChan 推送失败 HTTP %s", resp.status)
                     return False
@@ -74,7 +74,7 @@ class Notifier:
             ) as session:
                 async with session.post(push_url, json=payload) as resp:
                     if resp.status == 200:
-                        log.info("[Notify] Bark 推送成功: %s", title)
+                        log.info("[Notify] Bark 推送成功: %s | %s", title, content)
                         return True
                     log.warning("[Notify] Bark 推送失败 HTTP %s", resp.status)
                     return False
@@ -86,16 +86,12 @@ class Notifier:
 
     async def notify_token_expired(self) -> bool:
         return await self.send(
-            title="[MiPlay] 登录过期",
+            title="MiPlay · 登录过期",
             content="小米账号 Token 已过期，请重新登录获取。",
         )
 
     async def notify_login_failed(self, reason: str = "") -> bool:
         return await self.send(
-            title="[MiPlay] 登录失败",
-            content=f"请检查配置信息：\n{reason}",
+            title="MiPlay · 登录失败",
+            content=reason,
         )
-
-
-# Backward compatibility alias
-ServerChanNotifier = Notifier

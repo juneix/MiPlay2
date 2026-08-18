@@ -379,6 +379,11 @@ class AudioStreamServer:
             # 发送 WAV 头
             await response.write(self._build_wav_header(session_format))
 
+            # <!-- Section: Fast Burst Silence Buffer (填满音箱底层 Jitter Buffer 消除硬件开声死等) -->
+            burst_len = int(session_format.sample_rate * session_format.bytes_per_frame * 1.2)
+            burst_len -= (burst_len % session_format.bytes_per_frame)
+            await response.write(b"\x00" * burst_len)
+
             while not writer_done:
                 await data_ready.wait()
                 data_ready.clear()

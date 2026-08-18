@@ -2,17 +2,17 @@
   "host": "",
   "web_port": 8820,
   "verbose": false,
+  // AirPlay 1 分贝换算跨度 (范围: 20~50, 默认: 30)
+  // 觉得起步音量太小的用户可改为 35 或 40 垫高低档听感，100% 最大音量不受限
+  "db_range": 30,
+  // 全屋虚拟音箱对齐延时 (范围: 0~3000ms, 默认: 2000ms)
+  "virtual_delay": 2000,
   "xiaomi": {
-    "account": "",
-    "password": "",
     "cookie": ""
   },
   "notify": {
     "channel": "serverchan",
     "key": ""
-  },
-  "external": {
-    "wired_airplay_name": ""
   },
   "group": {
     "airplay_name": "MiPlay 全屋播放",
@@ -29,6 +29,5 @@
       "hardware": "",
       "use_music_api": false
     }
-  ],
-  "legacy": {}
+  ]
 }

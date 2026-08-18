@@ -10,14 +10,13 @@ import time
 
 import aiohttp
 
+from miplay.config import MIIO_UA, get_device_id
+
 log = logging.getLogger("miplay")
 
 ACCOUNT_BASE_URL = "https://account.xiaomi.com"
 LONG_POLLING_URL = "https://account.xiaomi.com/longPolling/loginUrl"
 QR_LOGIN_SID = "mijia"
-USER_AGENT_TEMPLATE = (
-    "Android-7.1.1-1.0.0-ONEPLUS A3010-136-%s APP/xiaomi.smarthome APPV/62830"
-)
 POLL_TIMEOUT_SECONDS = 35
 MAX_POLL_COUNT = 20
 SESSION_TTL_SECONDS = 300
@@ -55,9 +54,10 @@ def _normalize_url(url: str) -> str:
 class QRCodeSession:
     """Single QR code login session."""
 
-    def __init__(self):
-        self.device_id = secrets.token_hex(16)
-        self.user_agent = USER_AGENT_TEMPLATE % self.device_id
+    def __init__(self, conf_path: str = "conf"):
+        self.conf_path = conf_path
+        self.device_id = get_device_id(conf_path)
+        self.user_agent = MIIO_UA % self.device_id
         self.state = STATE_WAITING
         self.poll_url = ""
         self.poll_count = 0
@@ -178,14 +178,15 @@ class QRCodeSession:
 class QRLoginManager:
     """Manages active QR login sessions."""
 
-    def __init__(self):
+    def __init__(self, conf_path: str = "conf"):
+        self.conf_path = conf_path
         self._sessions: dict[str, QRCodeSession] = {}
         self._lock = asyncio.Lock()
 
     async def start(self) -> tuple[str, dict] | None:
         async with self._lock:
             self._cleanup_expired()
-            session = QRCodeSession()
+            session = QRCodeSession(self.conf_path)
             info = await session.get_qrcode()
             if not info:
                 await session.close()

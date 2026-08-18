@@ -88,7 +88,7 @@ class AirPlayBridge:
         elif vol_db >= 0:
             volume = 100
         else:
-            db_range = 30
+            db_range = getattr(self.config, "db_range", 30) if self.config else 30
             volume = int((vol_db + db_range) / db_range * 100)
             
             if volume < 0:
@@ -324,5 +324,3 @@ class BridgeManager:
             }
             res.append(group_snap)
         return res
-
-AirPlayBridgeManager = BridgeManager

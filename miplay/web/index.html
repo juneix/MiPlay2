@@ -1711,6 +1711,7 @@
     let discoveredDevices = [];
     let runtimeTargets = [];
     let currentDeviceListError = "";
+    let virtualSpeakers = [];
 
     const HINT_AUTO_HIDE_MS = 5000;
     const SUCCESS_HINT_MS = HINT_AUTO_HIDE_MS;
@@ -1728,8 +1729,242 @@
     let currentClientIp = window.location.hostname || "127.0.0.1";
     let isAudioUnlocked = false;
     let virtualRelayAudio = null;
+    let delayTimer = null;
+    let virtualDelay = 2000; // 默认 2000ms，对齐小米音箱硬件开声物理时间 (支持 conf/config.json 微调)
 
-    function initAudioAutoplayUnlock() {
+    // ---- 客户端设备标识 ----
+    function getOrCreateDeviceId() {
+      try {
+        let id = localStorage.getItem("miplay_device_uuid");
+        if (!id) {
+          id = "dev_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
+          localStorage.setItem("miplay_device_uuid", id);
+        }
+        return id;
+      } catch (e) {
+        if (!window._fallbackDevId) {
+          window._fallbackDevId = "dev_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
+        }
+        return window._fallbackDevId;
+      }
+    }
+
+    // ---- 同设备多 Tab 先来后到排他发声与自动交接 ----
+    let isAudioMasterTab = true;
+    let tabChannel = null;
+    const tabInstanceId = "tab_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now();
+
+    function initTabSync() {
+      if (!window.BroadcastChannel) {
+        isAudioMasterTab = true;
+        return;
+      }
+      try {
+        tabChannel = new BroadcastChannel("miplay_tab_channel");
+        tabChannel.postMessage({ type: "who_is_master", tabId: tabInstanceId });
+
+        let electionTimer = setTimeout(() => {
+          isAudioMasterTab = true;
+          tabChannel.postMessage({ type: "claim_master", tabId: tabInstanceId });
+        }, 250);
+
+        tabChannel.onmessage = (e) => {
+          const data = e.data || {};
+          if (data.type === "who_is_master") {
+            if (isAudioMasterTab) {
+              tabChannel.postMessage({ type: "i_am_master", tabId: tabInstanceId });
+            }
+          } else if (data.type === "i_am_master") {
+            if (data.tabId !== tabInstanceId) {
+              clearTimeout(electionTimer);
+              isAudioMasterTab = false;
+              if (virtualRelayAudio && !virtualRelayAudio.paused) {
+                virtualRelayAudio.pause();
+                virtualRelayAudio.src = "";
+              }
+            }
+          } else if (data.type === "claim_master") {
+            if (data.tabId !== tabInstanceId) {
+              clearTimeout(electionTimer);
+              isAudioMasterTab = false;
+            }
+          } else if (data.type === "master_closed") {
+            isAudioMasterTab = true;
+            tabChannel.postMessage({ type: "claim_master", tabId: tabInstanceId });
+            renderDeviceList();
+          }
+        };
+
+        window.addEventListener("pagehide", () => {
+          if (isAudioMasterTab && tabChannel) {
+            tabChannel.postMessage({ type: "master_closed", tabId: tabInstanceId });
+          }
+        });
+      } catch (err) {
+        isAudioMasterTab = true;
+      }
+    }
+
+    // ---- WebSocket 在线探活与断连即刻注销 ----
+    let wsClient = null;
+    let wsReconnectTimer = null;
+    let screenWakeLock = null;
+
+    async function acquireWakeLock() {
+      try {
+        if ("wakeLock" in navigator && !screenWakeLock) {
+          screenWakeLock = await navigator.wakeLock.request("screen");
+          screenWakeLock.addEventListener("release", () => { screenWakeLock = null; });
+        }
+      } catch (e) {}
+    }
+
+    function releaseWakeLock() {
+      if (screenWakeLock) {
+        screenWakeLock.release().catch(() => {});
+        screenWakeLock = null;
+      }
+    }
+
+    function updateMediaSession(isPlaying, title = "MiPlay 音频流") {
+      if ("mediaSession" in navigator) {
+        if (isPlaying) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: title,
+            artist: "MiPlay 虚拟音箱",
+            album: "MiPlay",
+            artwork: [{ src: "/static/icon.png", sizes: "512x512", type: "image/png" }]
+          });
+          navigator.mediaSession.playbackState = "playing";
+          navigator.mediaSession.setActionHandler("play", () => {
+            virtualRelayAudio && virtualRelayAudio.play();
+          });
+          navigator.mediaSession.setActionHandler("pause", () => {
+            virtualRelayAudio && virtualRelayAudio.pause();
+          });
+          navigator.mediaSession.setActionHandler("stop", () => {
+            virtualRelayAudio && virtualRelayAudio.pause();
+          });
+        } else {
+          navigator.mediaSession.playbackState = "paused";
+        }
+      }
+    }
+
+    function connectWebSocket() {
+      if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+      if (wsClient && (wsClient.readyState === WebSocket.OPEN || wsClient.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const deviceId = getOrCreateDeviceId();
+      const wsUrl = `${protocol}//${window.location.host}/api/ws?device_id=${encodeURIComponent(deviceId)}`;
+
+      try {
+        wsClient = new WebSocket(wsUrl);
+
+        wsClient.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "session_init") {
+              if (msg.client_ip) {
+                currentClientIp = msg.client_ip;
+              }
+              if (Array.isArray(msg.virtual_speakers)) {
+                virtualSpeakers = msg.virtual_speakers;
+              }
+              renderDeviceList();
+            } else if (msg.type === "presence_update") {
+              if (Array.isArray(msg.virtual_speakers)) {
+                virtualSpeakers = msg.virtual_speakers;
+                renderDeviceList();
+              }
+            } else if (msg.type === "control_command") {
+              const target = msg.target || "group_all";
+              const action = msg.action || "play_url";
+              const myDevId = getOrCreateDeviceId();
+              const isMatch = (
+                target === "group_all" ||
+                target === "virtual_all" ||
+                target === "virtual_web" ||
+                target === `virtual_${myDevId}` ||
+                target === `virtual_${currentClientIp}`
+              );
+              if (isMatch) {
+                if (action === "play_url" && msg.url) {
+                  if (delayTimer) {
+                    clearTimeout(delayTimer);
+                    delayTimer = null;
+                  }
+                  if (isAudioMasterTab && isAudioUnlocked && virtualRelayAudio) {
+                    const playUrl = msg.url.startsWith("/")
+                      ? (window.location.origin + msg.url + (msg.url.includes("?") ? "&" : "?") + "_t=" + Date.now())
+                      : msg.url;
+                    const delayMs = (target === "group_all" || target === "virtual_all") ? virtualDelay : 0;
+                    if (delayMs > 0) {
+                      delayTimer = setTimeout(() => {
+                        if (virtualRelayAudio) {
+                          virtualRelayAudio.src = playUrl;
+                          virtualRelayAudio.play().catch((e) => console.log("Play error:", e));
+                        }
+                      }, delayMs);
+                    } else {
+                      virtualRelayAudio.src = playUrl;
+                      virtualRelayAudio.play().catch((e) => console.log("Play error:", e));
+                    }
+                  }
+                } else if (action === "stop" || action === "pause") {
+                  if (delayTimer) {
+                    clearTimeout(delayTimer);
+                    delayTimer = null;
+                  }
+                  if (virtualRelayAudio) {
+                    virtualRelayAudio.pause();
+                    virtualRelayAudio.src = "";
+                  }
+                }
+              }
+            } else if (msg.type === "status_update") {
+              if (msg.runtime_targets) {
+                runtimeTargets = msg.runtime_targets;
+              }
+              renderDeviceList();
+            }
+          } catch (e) {}
+        };
+
+        wsClient.onclose = () => {
+          wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+        };
+
+        wsClient.onerror = () => {
+          wsClient && wsClient.close();
+        };
+      } catch (e) {
+        wsReconnectTimer = setTimeout(connectWebSocket, 5000);
+      }
+    }
+
+    // 10 秒应用层定时心跳包，防路由器/防火墙空闲掐断
+    setInterval(() => {
+      if (wsClient && wsClient.readyState === WebSocket.OPEN) {
+        wsClient.send(JSON.stringify({ type: "ping" }));
+      }
+    }, 10000);
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        if (!wsClient || wsClient.readyState === WebSocket.CLOSED || wsClient.readyState === WebSocket.CLOSING) {
+          connectWebSocket();
+        }
+        if (virtualRelayAudio && !virtualRelayAudio.paused) {
+          acquireWakeLock();
+        }
+      }
+    });
+
+    function initAudioUnlock() {
       function unlock() {
         if (isAudioUnlocked) return;
         try {
@@ -1742,6 +1977,20 @@
           }
           if (!virtualRelayAudio) {
             virtualRelayAudio = new Audio();
+            virtualRelayAudio.setAttribute("playsinline", "true");
+            virtualRelayAudio.setAttribute("webkit-playsinline", "true");
+            virtualRelayAudio.onplay = () => {
+              acquireWakeLock();
+              updateMediaSession(true);
+            };
+            virtualRelayAudio.onpause = () => {
+              releaseWakeLock();
+              updateMediaSession(false);
+            };
+            virtualRelayAudio.onended = () => {
+              releaseWakeLock();
+              updateMediaSession(false);
+            };
           }
           isAudioUnlocked = true;
         } catch (e) {}
@@ -1889,7 +2138,9 @@
     async function init() {
       initDefaultHintHTMLs();
       initTheme();
-      initAudioAutoplayUnlock();
+      initAudioUnlock();
+      initTabSync();
+      connectWebSocket();
       bindEvents();
 
       const modal = document.getElementById("about_modal");
@@ -1910,6 +2161,11 @@
       if (window.lucide) {
         lucide.createIcons();
       }
+
+      // 定时每 3 秒轻量同步运行时目标状态 (兜底保障 AirPlay 状态同步)
+      setInterval(() => {
+        fetchRuntimeTargets();
+      }, 3000);
     }
 
     function bindEvents() {
@@ -2011,9 +2267,8 @@
       if (panelBadge) {
         if (status.running) {
           panelBadge.textContent = `运行中 ${status.bridges_count || 0}/${status.targets_count || 0}`;
-          panelBadge.style.display = "inline-block";
         } else {
-          panelBadge.style.display = "none";
+          panelBadge.textContent = "运行中 -/-";
         }
       }
 
@@ -2055,6 +2310,7 @@
 
         subtext.textContent = "勾选参与全屋同步播放的音箱（测试版）";
       }
+      fetchRuntimeTargets();
       renderDeviceList();
     }
 
@@ -2068,8 +2324,14 @@
       if (data.client_ip) {
         currentClientIp = data.client_ip;
       }
+      if (Array.isArray(data.virtual_speakers)) {
+        virtualSpeakers = data.virtual_speakers;
+      }
       if (data.group) {
         currentGroup = data.group;
+      }
+      if (data.status && typeof data.status.virtual_delay === "number") {
+        virtualDelay = data.status.virtual_delay;
       }
       renderStatus(data.status || {});
 
@@ -2190,38 +2452,19 @@
       const container = document.getElementById("deviceList");
       const runtimeMap = getRuntimeMap(runtimeTargets);
       const savedMap = new Map((currentTargets || []).map((item) => [item.did, item]));
+      const badge = document.getElementById("panelBadge");
 
       // 过滤掉任何列表内可能混入的 Dummy 虚拟设备
-      let realDevices = discoveredDevices.filter(d => (d.miotDID || "") !== "group_all" && (d.miotDID || "") !== "virtual_relay");
-      if (!realDevices.length && currentTargets && currentTargets.length && currentSetting.xiaomi?.has_credentials) {
-        realDevices = currentTargets.map(t => ({
-          miotDID: t.did,
-          name: t.name,
-          hardware: t.hardware,
-          deviceID: t.device_id
-        }));
-      }
-
-      if (!realDevices.length) {
-        if (currentDeviceListError) {
-          container.innerHTML = `<div class="loading warning">同步失败：${escapeHtml(currentDeviceListError)}</div>`;
-        } else if (!currentSetting.xiaomi?.has_credentials) {
-          container.innerHTML = '<div class="loading">请先登录并同步设备</div>';
-        } else {
-          container.innerHTML = '<div class="loading">正在加载设备列表…</div>';
-        }
-        document.getElementById("panelBadge").style.display = "none";
-        return;
-      }
+      let realDevices = discoveredDevices.filter(d => (d.miotDID || "") !== "group_all" && !(d.miotDID || "").startsWith("virtual_relay"));
 
       const enabledCount = realDevices.filter(d => {
         const saved = savedMap.get(d.miotDID || "");
         return saved && saved.enabled;
       }).length;
 
-      const badge = document.getElementById("panelBadge");
-      badge.textContent = `运行中 ${enabledCount}/${realDevices.length}`;
-      badge.style.display = "flex";
+      if (badge) {
+        badge.textContent = realDevices.length ? `运行中 ${enabledCount}/${realDevices.length}` : "运行中 -/-";
+      }
 
       // 全屋虚拟设备 (Dummy) runtime 数据与元数据
       const groupRuntime = runtimeMap.get("group_all") || {};
@@ -2232,7 +2475,9 @@
       const groupSongArtist = groupMetadata.artist || "";
       const groupPortText = groupRuntime.rtsp_port ? groupRuntime.rtsp_port : "n/a";
 
-      const devicesHtml = realDevices.map((device) => {
+      let devicesHtml = "";
+      if (realDevices.length) {
+        devicesHtml = realDevices.map((device) => {
         const did = device.miotDID || "";
         const saved = savedMap.get(did) || {};
         const runtime = runtimeMap.get(did) || {};
@@ -2337,73 +2582,115 @@
             </div>
           </div>
         `;
-      }).join("");
+        }).join("");
+      } else {
+        if (currentDeviceListError) {
+          devicesHtml = `<div class="loading warning">${escapeHtml(currentDeviceListError)}</div>`;
+        } else if (!currentSetting.xiaomi?.has_credentials) {
+          devicesHtml = '<div class="loading">请先登录并同步设备</div>';
+        } else {
+          devicesHtml = '<div class="loading">正在加载设备列表…</div>';
+        }
+      }
 
       // ============================================================
-      // 浏览器虚拟中转节点 (MiPlay 中转 · Beta)
+      // 浏览器虚拟中转节点列表 (MiPlay 中转 · Beta)
       // ============================================================
-      const clientHost = currentClientIp || window.location.hostname || "127.0.0.1";
+      const myDeviceId = getOrCreateDeviceId();
+      const selfSpeaker = {
+        id: myDeviceId,
+        ip: currentClientIp || "127.0.0.1",
+        name: currentClientIp || "127.0.0.1"
+      };
+      const combinedSpeakers = [selfSpeaker, ...(virtualSpeakers || [])];
+      const seenIps = new Set();
+      const activeSpeakers = [];
+      for (const sp of combinedSpeakers) {
+        const ip = sp.ip || sp.name || "127.0.0.1";
+        if (ip && !seenIps.has(ip)) {
+          seenIps.add(ip);
+          activeSpeakers.push(sp);
+        }
+      }
+
+      // <!-- Section: Group Virtual Speaker Sync Playback (联动全屋模式并对齐米家延迟) -->
+      if (currentMode === "group" && groupPlaying && isAudioUnlocked && isAudioMasterTab && virtualRelayAudio) {
+        if (virtualRelayAudio.paused && !delayTimer) {
+          delayTimer = setTimeout(() => {
+            if (virtualRelayAudio && groupPlaying) {
+              virtualRelayAudio.src = "/stream/live.wav?t=" + Date.now();
+              virtualRelayAudio.play().catch(() => {});
+            }
+            delayTimer = null;
+          }, virtualDelay);
+        }
+      } else if ((!groupPlaying || !isAudioMasterTab) && virtualRelayAudio && (virtualRelayAudio.src || "").includes("/stream/live.wav")) {
+        if (delayTimer) {
+          clearTimeout(delayTimer);
+          delayTimer = null;
+        }
+        if (!virtualRelayAudio.paused) {
+          virtualRelayAudio.pause();
+          virtualRelayAudio.src = "";
+        }
+      }
+
       const relayChecked = true;
       const relayDot = groupPlaying ? "playing" : "idle";
       const relayStatus = groupPlaying ? (groupSongTitle ? `${escapeHtml(groupSongArtist)} - ${escapeHtml(groupSongTitle)}` : "中转播放中") : "待命";
       const relayPortText = "n/a";
 
-      // 联动手机浏览器虚拟音箱音频发声
-      if (currentMode === "group" && groupPlaying && isAudioUnlocked && virtualRelayAudio) {
-        if (virtualRelayAudio.paused) {
-          virtualRelayAudio.src = "/stream/live.wav?t=" + Date.now();
-          virtualRelayAudio.play().catch(() => {});
-        }
-      } else if (!groupPlaying && virtualRelayAudio && !virtualRelayAudio.paused) {
-        virtualRelayAudio.pause();
-        virtualRelayAudio.src = "";
-      }
+      const relayHtml = activeSpeakers.map((sp) => {
+        const clientHost = sp.name || sp.ip || currentClientIp || window.location.hostname || "127.0.0.1";
 
-      const relayHtml = `
-        <div class="device-row" data-did="virtual_relay">
-          <input class="device-check" type="checkbox" data-role="virtual-relay" ${relayChecked ? "checked" : ""} disabled>
-          <div class="device-card enabled">
-            <div class="device-main">
-              <div class="device-image" style="background-image:url('static/icon.png'); background-size:contain; background-color:rgba(0,0,0,0.03);"></div>
-              <div class="device-info">
-                <div class="info-line top">
-                  <div class="name-editor" data-role="name-editor">
-                    <span class="name-display" data-role="name-display">${escapeHtml(clientHost)}</span>
+        return `
+          <div class="device-row" data-did="virtual_relay_${escapeHtml(sp.id)}">
+            <input class="device-check" type="checkbox" data-role="virtual-relay" ${relayChecked ? "checked" : ""} disabled>
+            <div class="device-card enabled">
+              <div class="device-main">
+                <div class="device-image" style="background-image:url('static/icon.png'); background-size:contain; background-color:rgba(0,0,0,0.03);"></div>
+                <div class="device-info">
+                  <div class="info-line top">
+                    <div class="name-editor" data-role="name-editor">
+                      <span class="name-display" data-role="name-display">${escapeHtml(clientHost)}</span>
+                      <input class="name-input" data-role="name" value="${escapeHtml(clientHost)}" aria-label="虚拟音箱名称">
+                      <i data-lucide="pencil-line" class="edit-icon" data-role="edit-name"></i>
+                    </div>
+                    <div class="model-text pc-only">MiPlay 中转 · Beta</div>
                   </div>
-                  <div class="model-text pc-only">MiPlay 中转 · Beta</div>
-                </div>
-                <div class="info-line mobile-only">
-                  <div class="model-text">MiPlay 中转 · Beta</div>
-                </div>
-                <div class="info-line bottom pc-only">
-                  <div class="status-note">
-                    <span class="status-dot ${relayDot}"></span>
-                    <span class="status-text">${relayStatus}</span>
+                  <div class="info-line mobile-only">
+                    <div class="model-text">MiPlay 中转 · Beta</div>
                   </div>
-                  <div class="device-status">
-                    <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
-                    <span class="status-chip ${groupPlaying ? 'playing' : ''}">
-                      ${escapeHtml(relayPortText)}
-                    </span>
+                  <div class="info-line bottom pc-only">
+                    <div class="status-note">
+                      <span class="status-dot ${relayDot}"></span>
+                      <span class="status-text">${relayStatus}</span>
+                    </div>
+                    <div class="device-status">
+                      <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
+                      <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                        ${escapeHtml(relayPortText)}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-            <div class="info-line bottom mobile-only">
-              <div class="status-note">
-                <span class="status-dot ${relayDot}"></span>
-                <span class="status-text">${relayStatus}</span>
-              </div>
-              <div class="device-status">
-                <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
-                <span class="status-chip ${groupPlaying ? 'playing' : ''}">
-                  ${escapeHtml(relayPortText)}
-                </span>
+              <div class="info-line bottom mobile-only">
+                <div class="status-note">
+                  <span class="status-dot ${relayDot}"></span>
+                  <span class="status-text">${relayStatus}</span>
+                </div>
+                <div class="device-status">
+                  <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
+                  <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                    ${escapeHtml(relayPortText)}
+                  </span>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      `;
+        `;
+      }).join("");
 
       // ============================================================
       // 全屋虚拟 Dummy 设备卡片 (仅全屋模式下显示)
@@ -2741,23 +3028,13 @@
 
     async function syncDevices() {
       setActionButtonsDisabled(true);
-      const container = document.getElementById("deviceList");
-      if (container) {
-        container.innerHTML = '<div class="loading">正在同步设备…</div>';
-      }
-
       try {
         const result = await refreshDashboard(true);
-        if (!result.ok) {
-          if (container) {
-            container.innerHTML = `<div class="loading warning">同步失败：${escapeHtml(result.deviceListError || "请检查 Cookie 或网络设置")}</div>`;
-          }
-          return;
+        if (!result.ok && result.deviceListError) {
+          setHint("saveHint", result.deviceListError, "warning", ERROR_HINT_MS);
         }
       } catch (error) {
-        if (container) {
-          container.innerHTML = `<div class="loading warning">${escapeHtml(error.message || "请求失败 (404)")}</div>`;
-        }
+        setHint("saveHint", error.message || "同步失败，请稍后重试", "warning", ERROR_HINT_MS);
       } finally {
         setActionButtonsDisabled(false);
       }
@@ -2814,9 +3091,9 @@
     }
 
     function collectTargets() {
-      // 过滤掉全屋虚拟 Dummy 设备 (data-did="group_all") 与虚拟中转节点 (data-did="virtual_relay")
+      // 过滤掉全屋虚拟 Dummy 设备 (data-did="group_all") 与虚拟中转节点 (data-did 以 virtual_relay 开头)
       const rows = Array.from(document.querySelectorAll("#deviceList .device-row")).filter(
-        row => row.dataset.did !== "group_all" && row.dataset.did !== "virtual_relay"
+        row => row.dataset.did !== "group_all" && !row.dataset.did.startsWith("virtual_relay")
       );
       if (!rows.length && currentTargets && currentTargets.length) {
         return currentTargets;

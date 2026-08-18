@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MiPlay - 音频中枢测试工具</title>
+  <title>MiPlay - 音频测试</title>
   <link rel="icon" type="image/png" href="static/icon.png">
   <script src="static/lib/hls.min.js"></script>
   <style>
@@ -166,25 +166,23 @@
 <body>
   <div class="container">
     <div class="header">
-      <h1><img src="static/icon.png" width="26" height="26" alt="logo">MiPlay 音频中枢测试</h1>
+      <h1><img src="static/icon.png" width="26" height="26" alt="logo">MiPlay 音频测试</h1>
       <a href="/" style="font-size:13px; color:var(--accent); text-decoration:none; font-weight:600;">返回控制台</a>
     </div>
 
-    <!-- 步骤 1：选择播放目标终端 -->
+    <!-- 步骤 1：选择输出终端 -->
     <div class="card">
-      <h2>1. 选择目标音箱 / 输出终端</h2>
+      <h2>1. 输出音箱</h2>
       <div class="form-group">
-        <label>输出目标 (包含真实小米音箱与 Web 虚拟音箱)</label>
         <select id="playTarget">
-          <option value="virtual_web">🌐 Web 浏览器虚拟音箱 (本机声卡 / 当前网页)</option>
-          <option value="group_all">🏠 全屋组播 (所有小米音箱 + Web 虚拟音箱)</option>
+          <option value="group_all">🏠 全屋组播 (小米音箱 + 虚拟音箱)</option>
         </select>
       </div>
     </div>
 
-    <!-- 步骤 2：选择音频输入源进行测试 -->
+    <!-- 步骤 2：选择音频输入源 -->
     <div class="card">
-      <h2>2. 选择音频来源并测试</h2>
+      <h2>2. 音频来源</h2>
       
       <div class="tabs">
         <button class="tab-btn active" id="tabUrlBtn" type="button">在线音频</button>
@@ -218,8 +216,8 @@
         
         <!-- 仅在选择“自定义输入”时显现 -->
         <div class="form-group" id="customUrlGroup" style="display: none;">
-          <label>自定义音频 URL 直链</label>
-          <input type="text" id="playUrl" placeholder="请输入 http(s):// 音频直链或 .m3u8 广播流">
+          <label>URL 直链</label>
+          <input type="text" id="playUrl" placeholder="请输入音频直链或 .m3u8 广播流 http(s)://…">
         </div>
 
         <div class="actions">
@@ -231,11 +229,11 @@
       <!-- 选项 B: 本地文件推流 -->
       <div id="sectionStream" style="display:none; margin-top:14px;">
         <div class="form-group">
-          <label>选择本地音频文件</label>
+          <label>上传文件</label>
           <input type="file" id="localAudioFile" accept=".mp3,.m4a,.aac,.flac,.wav,audio/*">
         </div>
         <div class="actions">
-          <button class="primary" id="btnStartStream" type="button">推流</button>
+          <button class="primary" id="btnStartStream" type="button">播放</button>
           <button class="ghost" id="btnStopStream" type="button">停止</button>
         </div>
       </div>
@@ -243,8 +241,14 @@
 
     <!-- 运行日志 -->
     <div class="card">
-      <h2>运行日志</h2>
-      <div class="log-box" id="testLog">等待操作...</div>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <h2 style="margin:0;">运行日志</h2>
+        <div style="display:flex; gap:6px;">
+          <button class="ghost" id="btnCopyLog" type="button" style="padding:4px 10px; font-size:12px; cursor:pointer;">复制</button>
+          <button class="ghost" id="btnClearLog" type="button" style="padding:4px 10px; font-size:12px; cursor:pointer;">清空</button>
+        </div>
+      </div>
+      <div class="log-box" id="testLog" style="min-height: 220px; max-height: 380px;">等待操作...</div>
     </div>
   </div>
 
@@ -282,11 +286,40 @@
     const playUrlInput = document.getElementById("playUrl");
 
     presetUrlSelect.addEventListener("change", () => {
+      const text = presetUrlSelect.options[presetUrlSelect.selectedIndex]?.text || presetUrlSelect.value;
       if (presetUrlSelect.value === "custom") {
         customUrlGroup.style.display = "flex";
         playUrlInput.focus();
+        appendLog(`切换音频源 -> 自定义音频输入`);
       } else {
         customUrlGroup.style.display = "none";
+        appendLog(`切换音频源 -> ${text}`);
+      }
+    });
+
+    document.getElementById("playTarget").addEventListener("change", (e) => {
+      const text = e.target.options[e.target.selectedIndex]?.text || e.target.value;
+      appendLog(`切换目标设备 -> ${text}`);
+    });
+
+    document.getElementById("btnClearLog").addEventListener("click", () => {
+      logBox.textContent = "等待操作...";
+    });
+
+    document.getElementById("btnCopyLog").addEventListener("click", async () => {
+      const text = logBox.textContent || "";
+      if (!text || text === "等待操作...") return;
+      try {
+        await navigator.clipboard.writeText(text);
+        appendLog("已复制运行日志到剪贴板");
+      } catch (e) {
+        const t = document.createElement("textarea");
+        t.value = text;
+        document.body.appendChild(t);
+        t.select();
+        document.execCommand("copy");
+        document.body.removeChild(t);
+        appendLog("已复制运行日志到剪贴板");
       }
     });
 
@@ -301,76 +334,31 @@
       return sel;
     }
 
-    // 内部音频输出实例与 Hls 控制器
-    let internalAudio = new Audio();
-    let hlsInstance = null;
-    let isTestAudioUnlocked = false;
-
-    function initTestAudioUnlock() {
-      function unlock() {
-        if (isTestAudioUnlocked) return;
-        try {
-          const AudioContext = window.AudioContext || window.webkitAudioContext;
-          if (AudioContext) {
-            const ctx = new AudioContext();
-            ctx.resume().then(() => { isTestAudioUnlocked = true; });
-          }
-          isTestAudioUnlocked = true;
-        } catch (e) {}
-        window.removeEventListener("touchstart", unlock);
-        window.removeEventListener("pointerdown", unlock);
-        window.removeEventListener("click", unlock);
-        window.removeEventListener("scroll", unlock);
-      }
-      window.addEventListener("touchstart", unlock, { passive: true });
-      window.addEventListener("pointerdown", unlock, { passive: true });
-      window.addEventListener("click", unlock, { passive: true });
-      window.addEventListener("scroll", unlock, { passive: true });
-    }
-    initTestAudioUnlock();
-
-    function playLocalAudio(url) {
-      if (hlsInstance) {
-        hlsInstance.destroy();
-        hlsInstance = null;
-      }
-      const isM3U8 = url.includes(".m3u8") || url.includes("/live/");
-      const effectiveUrl = (isM3U8 && url.startsWith("http") && !url.startsWith(window.location.origin))
-        ? ("/api/v1/proxy?url=" + encodeURIComponent(url))
-        : url;
-
-      if (isM3U8 && window.Hls && Hls.isSupported()) {
-        hlsInstance = new Hls();
-        hlsInstance.loadSource(effectiveUrl);
-        hlsInstance.attachMedia(internalAudio);
-        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-          internalAudio.play().catch(() => appendLog("提示：可在页面点击以允许播放"));
-        });
-      } else {
-        internalAudio.src = effectiveUrl;
-        internalAudio.play().catch(() => appendLog("提示：可在页面点击以允许播放"));
-      }
-    }
-
-    function stopLocalAudio() {
-      if (hlsInstance) {
-        hlsInstance.destroy();
-        hlsInstance = null;
-      }
-      internalAudio.pause();
-      internalAudio.src = "";
-    }
-
-    // 1. 初始化加载所有目标音箱
+    // 1. 初始化加载所有目标音箱 (全屋组播 + 动态虚拟音箱 + 真实小米音箱)
     async function loadTargets() {
       try {
         const res = await fetch("/api/setting").then(r => r.json());
         const select = document.getElementById("playTarget");
-        const clientIp = res.client_ip || "当前网页";
-        const virtualWebOpt = select.querySelector('option[value="virtual_web"]');
-        if (virtualWebOpt) {
-          virtualWebOpt.textContent = `🌐 Web 浏览器虚拟音箱 (${clientIp})`;
+        const currentSelected = select.value;
+        select.innerHTML = "";
+
+        // 全屋组播
+        const groupOpt = document.createElement("option");
+        groupOpt.value = "group_all";
+        groupOpt.textContent = "🏠 全屋组播 (小米音箱 + 虚拟音箱)";
+        select.appendChild(groupOpt);
+
+        // 动态遍历局域网各在线 Web 虚拟音箱
+        if (res.virtual_speakers && res.virtual_speakers.length) {
+          res.virtual_speakers.forEach(sp => {
+            const opt = document.createElement("option");
+            opt.value = `virtual_${sp.id}`;
+            opt.textContent = `🌐 Web 虚拟音箱 (${sp.ip || sp.name})`;
+            select.appendChild(opt);
+          });
         }
+
+        // 真实小米音箱
         if (res.targets && res.targets.length) {
           res.targets.forEach(t => {
             if (t.enabled) {
@@ -381,62 +369,68 @@
             }
           });
         }
+
+        if (currentSelected && select.querySelector(`option[value="${currentSelected}"]`)) {
+          select.value = currentSelected;
+        }
       } catch (err) {
         appendLog("加载音箱列表失败: " + err.message);
       }
     }
+
     loadTargets();
 
-    // 2. 在线 URL / M3U8 广播测试
+    // 2. 在线 URL / M3U8 广播测试 (100% 经由 MiPlay 中枢调度)
     document.getElementById("btnPlayUrl").addEventListener("click", async () => {
       const url = getSelectedAudioUrl();
-      const target = document.getElementById("playTarget").value;
+      const select = document.getElementById("playTarget");
+      const target = select.value;
+      const targetName = select.options[select.selectedIndex]?.text || target;
       if (!url) return alert("请输入或选择有效的音频 URL");
 
-      appendLog(`下发播放指令 -> 目标: ${target}, 音频: ${url}`);
-
-      // 若目标是 Web 虚拟音箱
-      if (target === "virtual_web") {
-        playLocalAudio(url);
-        appendLog("Web 虚拟音箱已开始播放音频");
-        return;
-      }
+      appendLog(`发送播放指令 -> 目标: ${targetName}, URL: ${url}`);
+      const startT = Date.now();
 
       try {
-        const res = await fetch("/api/v1/control/play", {
+        const resp = await fetch("/api/v1/control/play", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "play_url", url, target })
-        }).then(r => r.json());
-        appendLog(res.ok ? "播放指令下发成功" : `指令失败: ${res.message}`);
-
-        if (target === "group_all") {
-          playLocalAudio(url);
+        });
+        const dur = Date.now() - startT;
+        const res = await resp.json();
+        if (res.ok) {
+          appendLog(`响应成功 (${resp.status} OK, ${dur}ms) -> 指令已由 MiPlay 中枢下发`);
+        } else {
+          appendLog(`响应失败 (${resp.status}, ${dur}ms) -> ${res.message || '未知错误'}`);
         }
       } catch (err) {
-        appendLog("请求异常: " + err.message);
+        appendLog(`请求异常 (${Date.now() - startT}ms) -> ${err.message}`);
       }
     });
 
     document.getElementById("btnStopUrl").addEventListener("click", async () => {
-      const target = document.getElementById("playTarget").value;
-      appendLog(`下发停止指令 -> 目标: ${target}`);
-      stopLocalAudio();
-
-      if (target === "virtual_web") {
-        appendLog("已停止 Web 虚拟音箱播放");
-        return;
-      }
+      const select = document.getElementById("playTarget");
+      const target = select.value;
+      const targetName = select.options[select.selectedIndex]?.text || target;
+      appendLog(`发送停止指令 -> 目标: ${targetName}`);
+      const startT = Date.now();
 
       try {
-        const res = await fetch("/api/v1/control/play", {
+        const resp = await fetch("/api/v1/control/play", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "stop", target })
-        }).then(r => r.json());
-        appendLog(res.ok ? "已通知停止" : `停止失败: ${res.message}`);
+        });
+        const dur = Date.now() - startT;
+        const res = await resp.json();
+        if (res.ok) {
+          appendLog(`响应成功 (${resp.status} OK, ${dur}ms) -> 已通知目标停止播放`);
+        } else {
+          appendLog(`响应失败 (${resp.status}, ${dur}ms) -> ${res.message || '未知错误'}`);
+        }
       } catch (err) {
-        appendLog("请求异常: " + err.message);
+        appendLog(`请求异常 (${Date.now() - startT}ms) -> ${err.message}`);
       }
     });
 
@@ -444,10 +438,12 @@
     let streamAbortController = null;
     document.getElementById("btnStartStream").addEventListener("click", async () => {
       const fileInput = document.getElementById("localAudioFile");
-      const target = document.getElementById("playTarget").value;
+      const select = document.getElementById("playTarget");
+      const target = select.value;
+      const targetName = select.options[select.selectedIndex]?.text || target;
       if (!fileInput.files || !fileInput.files[0]) return alert("请先选择本地音频文件");
       const file = fileInput.files[0];
-      appendLog(`正在读取本地文件: ${file.name}...`);
+      appendLog(`读取本地文件: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`);
 
       try {
         const arrayBuffer = await file.arrayBuffer();
@@ -465,24 +461,26 @@
           pcmBuffer[i * 2 + 1] = Math.max(-1, Math.min(1, right[i])) * 32767;
         }
 
-        appendLog(`解码完成，开始推流至目标: ${target}...`);
-        
-        if (target === "group_all" || target === "virtual_web") {
-          playLocalAudio("/stream/live.wav?t=" + Date.now());
-        }
+        appendLog(`音频解码完成 (时长: ${decoded.duration.toFixed(1)}s)，开始推流至: ${targetName}...`);
 
         streamAbortController = new AbortController();
+        const startT = Date.now();
         const res = await fetch("/api/v1/audio/stream", {
           method: "POST",
           headers: {
             "Content-Type": "audio/x-raw",
-            "X-Target-ID": target === "virtual_web" ? "group_all" : target
+            "X-Target-ID": target
           },
           body: pcmBuffer.buffer,
           signal: streamAbortController.signal
         });
         const json = await res.json();
-        appendLog(json.ok ? "推流已顺利结束" : `推流响应: ${json.message}`);
+        const dur = Date.now() - startT;
+        if (json.ok) {
+          appendLog(`推流已顺利结束 (${dur}ms)`);
+        } else {
+          appendLog(`推流响应失败: ${json.message}`);
+        }
       } catch (err) {
         if (err.name === "AbortError") {
           appendLog("已手动停止推流");
@@ -493,11 +491,19 @@
     });
 
     document.getElementById("btnStopStream").addEventListener("click", () => {
+      const select = document.getElementById("playTarget");
+      const target = select.value;
+      const targetName = select.options[select.selectedIndex]?.text || target;
       if (streamAbortController) {
         streamAbortController.abort();
         streamAbortController = null;
       }
-      stopLocalAudio();
+      appendLog(`已手动停止推流 -> ${targetName}`);
+      fetch("/api/v1/control/play", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop", target })
+      }).catch(() => {});
     });
   </script>
 </body>

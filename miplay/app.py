@@ -21,7 +21,7 @@ from aiohttp import web
 
 from miplay.audio_hub import AudioHub
 from miplay.bridge import BridgeManager
-from miplay.config import Config, build_external_status, detect_name_conflicts
+from miplay.config import Config, detect_name_conflicts
 from miplay.logger import ColoredFormatter, PlainTextFormatter, RateLimitFilter
 from miplay.version import __version__, check_for_updates
 from miplay.web.api import create_web_app
@@ -44,16 +44,13 @@ class MiPlay:
         self.warnings: list[str] = []
 
     async def get_all_devices(self) -> list[dict]:
-        if not self.config.xiaomi.account and not self.config.xiaomi.cookie:
+        if not self.config.xiaomi.cookie:
             return []
         await self.auth.ensure_login()
         return await self.auth.get_device_list()
 
     def _refresh_warnings(self):
-        self.warnings = detect_name_conflicts(
-            self.config.targets,
-            self.config.external.wired_airplay_name,
-        )
+        self.warnings = detect_name_conflicts(self.config.targets)
 
     async def start(self):
         self._setup_logging()
@@ -70,7 +67,7 @@ class MiPlay:
         notifier = self.target_manager.notifier if hasattr(self.target_manager, "notifier") else None
         asyncio.create_task(check_for_updates(notifier))
 
-        if self.config.xiaomi.account or self.config.xiaomi.cookie:
+        if self.config.xiaomi.cookie:
             await self._start_bridges()
         else:
             self.status_message = "Configure Xiaomi credentials to enable wireless bridge targets."
@@ -162,17 +159,17 @@ class MiPlay:
         return None
 
     def get_status_snapshot(self) -> dict:
-        external = build_external_status(self.config)
         return {
             "version": __version__,
             "running": self.running,
             "host": self.config.host,
             "web_port": self.config.web_port,
+            "db_range": self.config.db_range,
+            "virtual_delay": self.config.virtual_delay,
             "targets_count": len(self.config.get_enabled_targets()),
             "bridges_count": len(self.bridge_manager.bridges) if self.bridge_manager else 0,
             "status_message": self.status_message,
             "warnings": self.warnings,
-            "external": external,
             "hub": self.audio_hub.get_status() if self.audio_hub else {},
         }
 

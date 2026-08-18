@@ -19,12 +19,12 @@ import re
 import aiohttp
 from miservice import MiAccount, MiIOService, MiNAService
 
-from miplay.config import Config, TargetConfig
+from miplay.config import Config, TargetConfig, get_device_id, MIIO_UA
 from miplay.notify import Notifier
 
 log = logging.getLogger("miplay")
 
-NEED_USE_PLAY_MUSIC_API = [
+MUSIC_API_MODELS = [
     "X08C",
     "X08E",
     "X8F",
@@ -78,19 +78,46 @@ class AuthManager:
     @staticmethod
     def _has_basic_token(account: MiAccount | None) -> bool:
         token = getattr(account, "token", None) or {}
-        return bool(token.get("userId") and token.get("passToken"))
+        has_user = bool(token.get("userId"))
+        has_pass = bool(token.get("passToken"))
+        has_service = bool(isinstance(token.get("micoapi"), (list, tuple)) and len(token["micoapi"]) == 2)
+        return has_user and (has_pass or has_service)
 
-    def _describe_login_failure(self, exc: Exception | None = None) -> str:
-        text = str(exc or "")
-        code = self.extract_error_code(text)
-        lowered = text.lower()
-        if code == "87001" or "captcha" in lowered:
-            return "Xiaomi login requires captcha verification; account/password is not supported in this state. Please use fresh cookies instead."
-        if code == "70016":
-            return "Xiaomi login verification failed. Please use fresh cookies instead of account/password."
-        if "userid" in lowered:
-            return "Xiaomi account requires additional security verification. Please use fresh cookies instead."
-        return "Account/password login failed or requires Xiaomi security verification. Please use fresh cookies instead."
+    def _handle_auth_failure(self, raw_error: str):
+        self._logged_in = False
+        log.error("[Xiaomi] 登录失败: %s", raw_error)
+        if self.notifier:
+            self._safe_notify(self.notifier.notify_login_failed(raw_error))
+        raise DeviceListError(raw_error)
+
+    async def _execute_login(self, sid: str = "micoapi"):
+        try:
+            resp = await self.account._serviceLogin(f"serviceLogin?sid={sid}&_json=true")
+            if isinstance(resp, dict) and resp.get("code") != 0:
+                code = resp.get("code")
+                desc = resp.get("description") or resp.get("desc") or resp.get("result") or ""
+                raw_error = f"[{code}] {desc}".strip() if desc else f"[{code}]"
+                self._handle_auth_failure(raw_error)
+
+            if not isinstance(resp, dict) or "location" not in resp or "nonce" not in resp or "ssecurity" not in resp:
+                self._handle_auth_failure("登录换票响应数据不完整")
+
+            if "userId" in resp:
+                self.account.token["userId"] = str(resp["userId"])
+            if "passToken" in resp:
+                self.account.token["passToken"] = resp["passToken"]
+
+            service_token = await self.account._securityTokenService(
+                resp["location"], resp["nonce"], resp["ssecurity"]
+            )
+            self.account.token[sid] = (resp["ssecurity"], service_token)
+            if self.account.token_store:
+                self.account.token_store.save_token(self.account.token)
+            self._logged_in = True
+        except DeviceListError:
+            raise
+        except Exception as exc:
+            self._handle_auth_failure(str(exc))
 
     async def login(self):
         async with self._login_lock:
@@ -109,47 +136,43 @@ class AuthManager:
                     timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
                 )
 
+            dev_id = get_device_id(self.config.conf_path)
+            self.account = MiAccount(self.session, "", "", token_store=self.token_store)
+            cached_token = self.account.token or {}
+
             token_data = {}
             if self.config.xiaomi.cookie:
                 token_data = parse_cookie_string(self.config.xiaomi.cookie)
 
+            # 如果用户在配置中提供了 Cookie，同步注入 Token
             if token_data.get("userId") and token_data.get("passToken"):
-                self.account = MiAccount(self.session, "", "", token_store=self.token_store)
-                self.account.token = {
-                    "userId": token_data["userId"],
-                    "passToken": token_data["passToken"],
-                    "deviceId": "miplay_device",
-                }
+                cached_token["userId"] = token_data["userId"]
+                cached_token["passToken"] = token_data["passToken"]
                 self._cookie_loaded = True
-                await self.account.login("micoapi")
-                self._logged_in = self._has_basic_token(self.account)
-                if not self._logged_in:
-                    if self.notifier:
-                        self._safe_notify(self.notifier.notify_login_failed("token incomplete after login"))
-                    raise DeviceListError("Cookie login failed: Xiaomi token is incomplete after login")
-                log.info("Xiaomi cookie login succeeded")
             else:
                 self._cookie_loaded = False
-                self.account = MiAccount(
-                    self.session,
-                    self.config.xiaomi.account,
-                    self.config.xiaomi.password,
-                    token_store=self.token_store,
-                )
-                await self.account.login("micoapi")
-                self._logged_in = self._has_basic_token(self.account)
-                if not self._logged_in:
-                    log.error("[Xiaomi] 登录失败")
-                    if self.notifier:
-                        self._safe_notify(self.notifier.notify_login_failed(self._describe_login_failure()))
-                    raise DeviceListError(self._describe_login_failure())
-                log.info("Xiaomi account login succeeded")
+
+            if cached_token.get("userId") and (cached_token.get("passToken") or "micoapi" in cached_token):
+                cached_token["deviceId"] = dev_id
+                self.account.token = cached_token
+                self.account.now_ua = MIIO_UA % dev_id
+
+                # 若本地缓存已有有效的 micoapi serviceToken，直接判定登录成功，无需重复换票
+                if isinstance(cached_token.get("micoapi"), (list, tuple)) and len(cached_token["micoapi"]) == 2:
+                    self._logged_in = True
+                    log.info("Xiaomi login succeeded (using cached serviceToken)")
+                else:
+                    await self._execute_login("micoapi")
+                    log.info("Xiaomi login succeeded")
+            else:
+                self._logged_in = False
+                return
 
             self.mina_service = MiNAService(self.account)
             self.miio_service = MiIOService(self.account)
 
     async def ensure_login(self):
-        if self.mina_service is None:
+        if self.mina_service is None or not self._logged_in:
             await self.login()
 
     def is_logged_in(self) -> bool:
@@ -157,8 +180,8 @@ class AuthManager:
 
     async def get_device_list(self) -> list[dict]:
         await self.ensure_login()
-        if self.mina_service is None:
-            raise DeviceListError("Xiaomi service is not ready")
+        if self.mina_service is None or not self._logged_in:
+            return []
 
         current_task = self._device_list_task
         if current_task and not current_task.done():
@@ -208,7 +231,7 @@ class AuthManager:
 
                 if self.notifier:
                     self._safe_notify(self.notifier.notify_token_expired())
-                raise DeviceListError(f"Cookie or token may be expired: {exc}") from exc
+                raise DeviceListError(str(exc)) from exc
 
     async def update_targets_info(self) -> set[str]:
         devices = await self.get_device_list()
@@ -218,16 +241,16 @@ class AuthManager:
             for dev in devices:
                 did = dev.get("miotDID", "")
                 if did:
-                    name = dev.get("name", "") or f"Xiaomi Speaker {did}"
-                    self.config.targets.append(TargetConfig(did=did, name=name, enabled=True))
+                    name = dev.get("name", "").strip() or dev.get("hardware", "").strip() or f"小爱音箱-{did}"
+                    hardware = dev.get("hardware", "").strip()
+                    device_id = dev.get("deviceID", "").strip()
+                    self.config.targets.append(TargetConfig(did=did, name=name, airplay_name=name, hardware=hardware, device_id=device_id, enabled=True))
             self.config.save()
             log.info("Auto-populated %d Xiaomi target speaker(s) from cloud", len(self.config.targets))
 
         selected_dids = {target.did for target in self.config.targets if target.did}
         synced_dids: set[str] = set()
         changed = False
-
-
 
         for device in devices:
             did = device.get("miotDID", "")
@@ -245,11 +268,9 @@ class AuthManager:
             if target.hardware != hardware:
                 target.hardware = hardware
                 changed = True
-            if name and target.name != name and not target.name.startswith("Xiaomi Speaker "):
-                target.name = target.name or name
-            elif name and target.name.startswith("Xiaomi Speaker "):
+            if name and target.name != name:
                 target.name = name
-                if not target.airplay_name or target.airplay_name.startswith("Xiaomi Speaker "):
+                if not target.airplay_name:
                     target.airplay_name = name
                 changed = True
             target.ensure_names()
@@ -322,7 +343,7 @@ class TargetController:
         return self.target.device_id
 
     def _should_use_music_api(self) -> bool:
-        return self.target.use_music_api or self.target.hardware in NEED_USE_PLAY_MUSIC_API
+        return self.target.use_music_api or self.target.hardware in MUSIC_API_MODELS
 
     async def play_url(self, url: str) -> bool:
         for attempt in range(2):
@@ -433,9 +454,3 @@ class TargetManager:
             self.controllers[target.id] = TargetController(target, self.auth)
             log.info("Initialized Xiaomi target: %s (did=%s, enabled=%s)", target.airplay_name, target.did, target.enabled)
         return synced_dids
-
-
-# 别名绑定向后兼容
-XiaomiAuthManager = AuthManager
-XiaomiTargetController = TargetController
-XiaomiTargetManager = TargetManager

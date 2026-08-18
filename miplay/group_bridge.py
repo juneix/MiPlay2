@@ -18,7 +18,7 @@ from zeroconf import Zeroconf
 
 from miplay.airplay.server import AirPlayServer
 from miplay.config import Config, TargetConfig
-from miplay.xiaomi import XiaomiTargetController
+from miplay.xiaomi import TargetController
 
 log = logging.getLogger("miplay")
 
@@ -45,7 +45,7 @@ class GroupController:
     def hardware(self) -> str:
         return "GROUP"
 
-    def get_member_controllers(self) -> list[XiaomiTargetController]:
+    def get_member_controllers(self) -> list[TargetController]:
         all_controllers = self._get_controllers()
         member_dids = set(self.config.group.member_dids)
         return [ctrl for ctrl in all_controllers.values() if ctrl.did in member_dids]
@@ -163,7 +163,7 @@ class GroupBridge:
         elif vol_db >= 0:
             volume = 100
         else:
-            db_range = 30
+            db_range = getattr(self.config, "db_range", 30) if self.config else 30
             volume = int((vol_db + db_range) / db_range * 100)
             volume = max(0, min(100, volume))
             if volume == 0 and vol_db > -db_range:
@@ -176,6 +176,16 @@ class GroupBridge:
         self._stream_url = stream_url
         self._airplay_active = True
         self._play_grace_until = time.time() + 10.0
+        try:
+            from miplay.web.api import broadcast_ws
+            asyncio.create_task(broadcast_ws({
+                "type": "control_command",
+                "action": "play_url",
+                "target": "group_all",
+                "url": stream_url,
+            }))
+        except Exception:
+            pass
         if await self.controller.play_url(stream_url):
             self._start_poll()
             log.info("Group AirPlay stream attached to speakers (%s)", self.device_name)
@@ -185,6 +195,15 @@ class GroupBridge:
     async def _stop_target(self):
         self._airplay_active = False
         self._stream_url = ""
+        try:
+            from miplay.web.api import broadcast_ws
+            asyncio.create_task(broadcast_ws({
+                "type": "control_command",
+                "action": "stop",
+                "target": "group_all",
+            }))
+        except Exception:
+            pass
         if self._poll_task:
             self._poll_task.cancel()
             try:

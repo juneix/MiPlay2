@@ -12,10 +12,38 @@ from dataclasses import asdict, dataclass, field
 
 import sys
 
+# 现代主流小米客户端 UA 模板 (Xiaomi 14 / HyperOS Android 14 / 米家 9.x+)
+MIIO_UA = (
+    "Android-14-1.0.0-Xiaomi 23127PN0CC-136-%s APP/xiaomi.smarthome APPV/90800"
+)
 
-def _slugify(text: str) -> str:
-    value = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip()).strip("-").lower()
-    return value or "target"
+
+def get_device_id(conf_path: str = "conf") -> str:
+    """获取或初始化当前运行主机的固定设备指纹 (16位大写Hex)。
+    不同主机相互独立，单机上持久化保存于 conf/.device_id 永不漂移。
+    """
+    if not os.path.isabs(conf_path):
+        conf_path = os.path.abspath(conf_path)
+    os.makedirs(conf_path, exist_ok=True)
+    dev_file = os.path.join(conf_path, ".device_id")
+    if os.path.exists(dev_file):
+        try:
+            with open(dev_file, "r", encoding="utf-8") as f:
+                dev_id = f.read().strip().upper()
+                if dev_id and len(dev_id) == 16:
+                    return dev_id
+        except Exception:
+            pass
+
+    # 基于本机物理 MAC 硬件特征生成确定性 16 位 Hex 设备 ID
+    node_val = uuid.getnode()
+    raw_hex = f"{node_val:012X}A8F1"[:16].upper()
+    try:
+        with open(dev_file, "w", encoding="utf-8") as f:
+            f.write(raw_hex)
+    except Exception:
+        pass
+    return raw_hex
 
 
 def _is_invalid_lan_ip(ip: str) -> bool:
@@ -130,11 +158,7 @@ def normalize_service_name(name: str) -> str:
     return " ".join(name.strip().split())
 
 
-def detect_name_conflicts(
-    targets: list["TargetConfig"],
-    wired_airplay_name: str = "",
-) -> list[str]:
-    warnings: list[str] = []
+def detect_name_conflicts(targets: list["TargetConfig"]) -> list[str]:
     enabled_targets = [target for target in targets if target.enabled]
     counts = Counter(
         normalize_service_name(target.airplay_name).casefold()
@@ -143,50 +167,15 @@ def detect_name_conflicts(
     )
     duplicates = {name for name, count in counts.items() if count > 1}
     if duplicates:
-        warnings.append("MiPlay targets contain duplicate AirPlay names; rename them to avoid mDNS ambiguity.")
-
-    wired_name = normalize_service_name(wired_airplay_name)
-    if wired_name:
-        for target in enabled_targets:
-            if normalize_service_name(target.airplay_name).casefold() == wired_name.casefold():
-                warnings.append(
-                    f"Target '{target.airplay_name}' conflicts with external wired AirPlay name '{wired_name}'."
-                )
-                break
-    return warnings
-
-
-def build_external_status(config: "Config") -> dict:
-    wired_name = normalize_service_name(config.external.wired_airplay_name)
-    warnings = detect_name_conflicts(config.targets, wired_name)
-    return {
-        "wired_airplay_name": wired_name,
-        "name_conflicts": warnings,
-        "managed_externally": bool(wired_name),
-    }
-
-
-def is_port_available(port: int, host: str = "0.0.0.0") -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-        except OSError:
-            return False
-    return True
+        return [f"存在重复的 AirPlay 广播名称: '{name}'" for name in duplicates]
+    return []
 
 
 @dataclass
 class XiaomiConfig:
-    account: str = ""
-    password: str = ""
     cookie: str = ""
 
     def __post_init__(self):
-        if not self.account:
-            self.account = os.getenv("XIAOMI_ACCOUNT", "")
-        if not self.password:
-            self.password = os.getenv("XIAOMI_PASSWORD", "")
         if not self.cookie:
             self.cookie = os.getenv("XIAOMI_COOKIE", "")
 
@@ -204,15 +193,6 @@ class NotifyConfig:
                 self.channel = "serverchan"
             else:
                 self.channel = "bark"
-
-
-@dataclass
-class ExternalServiceConfig:
-    wired_airplay_name: str = ""
-
-    def __post_init__(self):
-        if not self.wired_airplay_name:
-            self.wired_airplay_name = os.getenv("WIRED_AIRPLAY_NAME", "").strip()
 
 
 @dataclass
@@ -234,13 +214,9 @@ class TargetConfig:
 
     def ensure_names(self):
         if not self.name:
-            self.name = f"Xiaomi Speaker {self.did or self.id}"
+            self.name = self.hardware or (f"小爱音箱-{self.did}" if self.did else "小爱音箱")
         if not self.airplay_name:
             self.airplay_name = self.name
-
-    @property
-    def slug(self) -> str:
-        return _slugify(self.id or self.did or self.airplay_name)
 
 
 @dataclass
@@ -262,25 +238,33 @@ class Config:
     host: str = ""
     web_port: int = 8820
     verbose: bool = False
+    db_range: int = 30  # AirPlay 1 分贝换算跨度 (范围: 20~50, 默认: 30)
+    virtual_delay: int = 2000  # 全屋虚拟音箱对齐延时毫秒 (范围: 0~3000ms, 默认: 2000ms)
     xiaomi: XiaomiConfig = field(default_factory=XiaomiConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
-    external: ExternalServiceConfig = field(default_factory=ExternalServiceConfig)
     group: GroupConfig = field(default_factory=GroupConfig)
     targets: list[TargetConfig] = field(default_factory=list)
-    legacy: dict = field(default_factory=dict)
     conf_path: str = "conf"
 
     _save_lock = threading.Lock()
 
     def __post_init__(self):
+        # 限制参数安全范围，防止用户异常配置
+        try:
+            self.db_range = max(20, min(50, int(self.db_range)))
+        except (ValueError, TypeError):
+            self.db_range = 30
+
+        try:
+            self.virtual_delay = max(0, min(3000, int(self.virtual_delay)))
+        except (ValueError, TypeError):
+            self.virtual_delay = 2000
+
         if isinstance(self.xiaomi, dict):
             self.xiaomi = XiaomiConfig(**self.xiaomi)
         if isinstance(self.notify, dict):
             self.notify = NotifyConfig(**self.notify)
-        if isinstance(self.external, dict):
-            self.external = ExternalServiceConfig(**self.external)
         if isinstance(self.group, dict):
-            # 兼容旧配置：剔除已废弃的 enabled 显式开关字段
             group_dict = {k: v for k, v in self.group.items() if k in ("airplay_name", "member_dids")}
             self.group = GroupConfig(**group_dict)
         
@@ -349,106 +333,19 @@ class Config:
             config.save()
             return config
 
-        with open(config_file, encoding="utf-8") as file:
-            raw = json.load(file)
-        # 擦除磁盘历史文件中可能残留存盘的旧 host 坏值
-        raw.pop("host", None)
-        migrated = cls._migrate(raw)
-        migrated["conf_path"] = conf_path
-        config = cls(**migrated)
-        if migrated != raw:
-            config.save()
-        return config
-
-    @classmethod
-    def _migrate(cls, raw: dict) -> dict:
-        if "xiaomi" in raw and "targets" in raw:
-            old_serverchan = raw.get("serverchan", {})
-            old_send_key = raw.get("serverchan_send_key", "") or (old_serverchan.get("send_key", "") if isinstance(old_serverchan, dict) else "")
-            notify_dict = raw.get("notify", {})
-            if not notify_dict and old_send_key:
-                notify_dict = {
-                    "channel": "serverchan" if old_send_key.startswith("sctp") else "bark",
-                    "key": old_send_key,
-                }
-
-            return {
-                "host": raw.get("host", raw.get("hostname", "")),
-                "web_port": raw.get("web_port", 8820),
-                "verbose": raw.get("verbose", False),
-                "xiaomi": raw.get("xiaomi", {}),
-                "notify": notify_dict,
-                "external": raw.get("external", {}),
-                "group": raw.get("group", {}),
-                "targets": raw.get("targets", []),
-                "legacy": raw.get("legacy", {}),
-            }
-
-        legacy = {}
-        legacy_keys = (
-            "hostname",
-
-            "auto_play_on_set_uri",
-            "auto_resume_on_interrupt",
-            "resume_delay_seconds",
-            "enable_voice_control",
-            "voice_poll_interval",
-            "proxy_enabled",
-            "mi_did",
+        with open(config_file, "r", encoding="utf-8") as file:
+            raw_text = file.read()
+        # 剥离 // 与 /* */ 注释 (保留 JSON 字符串内部的 URL 双斜杠)，原生支持 JSONC 语法
+        clean_text = re.sub(
+            r'("(?:\\.|[^"\\])*")|//.*?$|/\*.*?\*/',
+            lambda m: m.group(1) if m.group(1) else "",
+            raw_text,
+            flags=re.MULTILINE | re.DOTALL,
         )
-        for key in legacy_keys:
-            if key in raw:
-                legacy[key] = raw[key]
-
-        speakers = raw.get("speakers", {}) or {}
-        dids = []
-        if raw.get("mi_did"):
-            dids = [item.strip() for item in str(raw["mi_did"]).split(",") if item.strip()]
-        elif speakers:
-            dids = list(speakers.keys())
-
-        targets = []
-        for did in dids:
-            source = speakers.get(did, {}) if isinstance(speakers, dict) else {}
-            if not isinstance(source, dict):
-                source = {}
-            name = source.get("name", "").strip()
-            airplay_name = source.get("airplay_name", "").strip() or name
-            targets.append(
-                {
-                    "id": source.get("id", "") or did,
-                    "did": did,
-                    "name": name or f"Xiaomi Speaker {did}",
-                    "airplay_name": airplay_name or name or f"Xiaomi Speaker {did}",
-                    "enabled": source.get("enabled", True),
-                    "device_id": source.get("device_id", ""),
-                    "hardware": source.get("hardware", ""),
-                    "use_music_api": source.get("use_music_api", False),
-                }
-            )
-
-        old_serverchan = raw.get("serverchan", {})
-        old_send_key = raw.get("serverchan_send_key", "") or (old_serverchan.get("send_key", "") if isinstance(old_serverchan, dict) else "")
-        notify_dict = raw.get("notify", {})
-        if not notify_dict and old_send_key:
-            notify_dict = {
-                "channel": "serverchan" if old_send_key.startswith("sctp") else "bark",
-                "key": old_send_key,
-            }
-
-        res = {
-            "host": raw.get("host", raw.get("hostname", "")),
-            "web_port": raw.get("web_port", 8820),
-            "verbose": raw.get("verbose", False),
-            "xiaomi": {
-                "account": raw.get("account", "") if "xiaomi" not in raw else raw["xiaomi"].get("account", ""),
-                "password": raw.get("password", "") if "xiaomi" not in raw else raw["xiaomi"].get("password", ""),
-                "cookie": raw.get("cookie", "") if "xiaomi" not in raw else raw["xiaomi"].get("cookie", ""),
-            },
-            "notify": notify_dict,
-            "external": raw.get("external", {}),
-            "group": raw.get("group", {}),
-            "targets": targets if "targets" in raw else targets,
-            "legacy": legacy,
-        }
-        return res
+        raw = json.loads(clean_text)
+        # 擦除磁盘历史文件中可能残留存盘的旧 host 坏值与无用 legacy 字段
+        raw.pop("host", None)
+        raw.pop("legacy", None)
+        raw["conf_path"] = conf_path
+        config = cls(**raw)
+        return config
