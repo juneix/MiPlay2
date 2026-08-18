@@ -39,35 +39,28 @@ MiPlay（隔空妙播）是专为苹果用户和小米音箱打造的**局域网
 
 ```mermaid
 flowchart TD
-    subgraph TopSide ["☁️ 旁路服务 (云端鉴权 & 开放接口)"]
+    subgraph Side ["☁️ 旁路服务"]
         direction LR
         Cloud["☁️ 小米云端 API (登录鉴权)"] --> Notify["📲 通知推送 (Server酱 / Bark)"]
-        Music["🎼 第三方音乐库 / 自动化脚本 (标准 RESTful Audio API)"]
     end
 
-    subgraph MidLAN ["🌐 局域网通道 (音频发射与调度)"]
+    subgraph LAN ["🌐 局域网通道"]
         direction TD
-        A["📱 iPhone / Mac 发射端 (AirPlay 1 协议流)"]
-        Server["📡 MiPlay 服务器 (AirPlay 桥接 / 音频调度)"]
+        A1["📱 iPhone / Mac 发射端<br/>(AirPlay 1 协议)"] --> B["📡 MiPlay 音频中枢"]
+        A2["🎼 第三方音乐库 / 指令<br/>(标准 Audio API)"] --> B
         
-        A --> Server
-        Music -.->|API 推流 / 控制| Server
-    end
-
-    subgraph BottomOut ["🔊 音频输出 (单播 / 组播)"]
-        direction TD
-        Server --> Mode{"播放模式"}
+        B --> C{"播放模式"}
         
-        Mode -->|独立单播| Single["📢 独立 AirPlay 音箱"]
-        Mode -->|全屋组播| Group
+        C -->|独立单播| D["📢 独立 AirPlay 音箱"]
+        C -->|全屋组播| E
         
-        subgraph Group ["🏠 同步播放 (Beta)"]
+        subgraph E ["🏠 同步播放"]
             direction LR
             E1["📢 音箱 1"] --- E2["📢 音箱 2"] --- E3["📱 Web 虚拟音箱"]
         end
     end
 
-    TopSide --> MidLAN
+    Side -.- LAN
 ```
 
 ### 🔐 小米账号鉴权说明：
