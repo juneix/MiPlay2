@@ -178,9 +178,10 @@ class AirPlayBridge:
 
 
 class BridgeManager:
-    def __init__(self, host: str, config: Config):
+    def __init__(self, host: str, config: Config, audio_hub: Any | None = None):
         self.host = host
         self.config = config
+        self.audio_hub = audio_hub
         self.bridges: dict[str, AirPlayBridge] = {}
         self.group_bridge: Any | None = None
         self.shairport_bridge: Any | None = None
@@ -196,6 +197,11 @@ class BridgeManager:
                 continue
             bridge = AirPlayBridge(self.host, controller, self._shared_zeroconf, self.config)
             await bridge.start()
+            if self.audio_hub and bridge.airplay_server and bridge.airplay_server.audio_stream:
+                bridge.airplay_server.audio_stream.on_pcm_chunk = self.audio_hub.broadcast_pcm
+                bridge.airplay_server.audio_stream.on_streaming_state_change = (
+                    lambda active: self.audio_hub.start_source("airplay") if active else self.audio_hub.stop_source("airplay")
+                )
             self.bridges[target_id] = bridge
         log.info("Started %s independent AirPlay bridge endpoint(s)", len(self.bridges))
 
@@ -204,6 +210,7 @@ class BridgeManager:
         if controllers:
             from miplay.group_bridge import GroupController
             group_controller = GroupController(self.config, lambda: controllers)
+            self.group_controller = group_controller
 
             if is_dev:
                 # Dev 模式 (AirPlay 2)：由 Shairport-Sync 独占广播 "MiPlay 全屋播放"
@@ -213,6 +220,11 @@ class BridgeManager:
 
                 loop = asyncio.get_running_loop()
                 stream_server = AudioStreamServer(self.host)
+                if self.audio_hub:
+                    stream_server.on_pcm_chunk = self.audio_hub.broadcast_pcm
+                    stream_server.on_streaming_state_change = (
+                        lambda active: self.audio_hub.start_source("airplay") if active else self.audio_hub.stop_source("airplay")
+                    )
                 await stream_server.start()
 
                 self.shairport_bridge = ShairportBridge(
@@ -237,7 +249,20 @@ class BridgeManager:
                 from miplay.group_bridge import GroupBridge
                 self.group_bridge = GroupBridge(self.host, group_controller, self._shared_zeroconf, self.config)
                 await self.group_bridge.start()
+                if self.audio_hub and self.group_bridge.airplay_server and self.group_bridge.airplay_server.audio_stream:
+                    self.group_bridge.airplay_server.audio_stream.on_pcm_chunk = self.audio_hub.broadcast_pcm
+                    self.group_bridge.airplay_server.audio_stream.on_streaming_state_change = (
+                        lambda active: self.audio_hub.start_source("airplay") if active else self.audio_hub.stop_source("airplay")
+                    )
                 log.info("Started Group AirPlay bridge endpoint: %s", self.config.group.airplay_name)
+
+    def get_group_audio_stream_server(self):
+        """获取当前全屋组播的 AudioStreamServer 实例。"""
+        if self.group_bridge and self.group_bridge.airplay_server:
+            return self.group_bridge.airplay_server.audio_stream
+        if self.shairport_bridge and hasattr(self.shairport_bridge, "stream_server"):
+            return self.shairport_bridge.stream_server
+        return None
 
     async def stop(self):
         if self.shairport_bridge:
@@ -256,14 +281,16 @@ class BridgeManager:
                 log.error(f"Failed to stop group bridge: {exc}")
             self.group_bridge = None
 
-        for bridge in list(self.bridges.values()):
-            try:
-                await bridge.stop()
-            except Exception as exc:
-                log.error(f"Failed to stop bridge: {exc}")
-        self.bridges.clear()
+        if self.bridges:
+            tasks = [bridge.stop() for bridge in list(self.bridges.values())]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.bridges.clear()
+
         if self._shared_zeroconf:
-            self._shared_zeroconf.close()
+            try:
+                self._shared_zeroconf.close()
+            except Exception:
+                pass
             self._shared_zeroconf = None
 
     def snapshot(self) -> list[dict]:
@@ -282,7 +309,7 @@ class BridgeManager:
                 "client_name": "Shairport-Sync AirPlay 2",
                 "metadata": shairport_snapshot["metadata"],
                 "artwork": shairport_snapshot["artwork"],
-                "rtsp_port": 0,
+                "rtsp_port": 5000,
                 "stream_url": (
                     self.shairport_bridge.stream_server.stream_url
                     if self.shairport_bridge.stream_server and self.shairport_bridge._play_url_sent

@@ -187,6 +187,11 @@ class AirPlayServer:
         return socket.inet_pton(socket.AF_INET, self.ipv4)
 
     @property
+    def audio_stream(self) -> AudioStreamServer:
+        """获取底层音频流服务器实例"""
+        return self._stream_server
+
+    @property
     def is_playing(self) -> bool:
         """是否正在播放"""
         return self._is_playing

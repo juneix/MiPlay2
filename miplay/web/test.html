@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MiPlay - 音频中枢测试工具</title>
+  <link rel="icon" type="image/png" href="static/icon.png">
+  <script src="static/lib/hls.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --ink: #17212b;
+      --muted: #566371;
+      --panel: rgba(255, 252, 247, 0.95);
+      --line: rgba(23, 33, 43, 0.1);
+      --accent: #db5f28;
+      --accent-soft: rgba(219, 95, 40, 0.12);
+      --radius: 16px;
+      --good: #059669;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 16px 48px;
+      font-family: "Avenir Next", "Segoe UI", -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    .container {
+      max-width: 680px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      box-shadow: 0 6px 20px rgba(23,33,43,0.03);
+    }
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 15px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .form-group {
+      margin-bottom: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    input[type="text"], input[type="file"], select {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #ffffff;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--ink);
+    }
+    .format-hint {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin: 10px 0 14px;
+      padding: 0;
+      background: transparent;
+    }
+    .format-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .format-subtext {
+      font-size: 11.5px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .format-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      background: rgba(23,33,43,0.06);
+      border-radius: 4px;
+      font-family: monospace;
+      font-weight: 600;
+      color: var(--ink);
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 8px 20px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    .primary { background: var(--accent); color: white; }
+    .ghost { background: rgba(23, 33, 43, 0.06); color: var(--ink); }
+    .log-box {
+      background: #1e1e2e;
+      color: #a6adc8;
+      border-radius: 10px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      min-height: 90px;
+      max-height: 180px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+      background: rgba(23,33,43,0.05);
+      padding: 4px;
+      border-radius: 10px;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 7px 12px;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .tab-btn.active {
+      background: #ffffff;
+      color: var(--ink);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1><img src="static/icon.png" width="26" height="26" alt="logo">MiPlay 音频中枢测试</h1>
+      <a href="/" style="font-size:13px; color:var(--accent); text-decoration:none; font-weight:600;">返回控制台</a>
+    </div>
+
+    <!-- 步骤 1：选择播放目标终端 -->
+    <div class="card">
+      <h2>1. 选择目标音箱 / 输出终端</h2>
+      <div class="form-group">
+        <label>输出目标 (包含真实小米音箱与 Web 虚拟音箱)</label>
+        <select id="playTarget">
+          <option value="virtual_web">🌐 Web 浏览器虚拟音箱 (本机声卡 / 当前网页)</option>
+          <option value="group_all">🏠 全屋组播 (所有小米音箱 + Web 虚拟音箱)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- 步骤 2：选择音频输入源进行测试 -->
+    <div class="card">
+      <h2>2. 选择音频来源并测试</h2>
+      
+      <div class="tabs">
+        <button class="tab-btn active" id="tabUrlBtn" type="button">在线音频</button>
+        <button class="tab-btn" id="tabStreamBtn" type="button">本地文件</button>
+      </div>
+
+      <div class="format-hint">
+        <div class="format-line">
+          <span style="font-weight:600; font-size:12px; color:var(--ink);">原生支持：</span>
+          <span class="format-badge">.mp3</span>
+          <span class="format-badge">.m4a</span>
+          <span class="format-badge">.flac</span>
+          <span class="format-badge">.wav</span>
+          <span class="format-badge">.m3u8</span>
+        </div>
+        <div class="format-subtext">
+          💡 推荐使用原生音频格式；搭配中转解码，可兼容更多音频格式。
+        </div>
+      </div>
+
+      <!-- 选项 A: 在线 URL / M3U8 广播 -->
+      <div id="sectionUrl" style="margin-top:14px;">
+        <div class="form-group">
+          <label>音频选择</label>
+          <select id="presetUrlSelect">
+            <option value="builtin">🎵 测试音频 (speaker-test.m4a)</option>
+            <option value="https://ngcdn001.cnr.cn/live/zgzs/index.m3u8">📻 M3U8 电台 (中国之声)</option>
+            <option value="custom">✏️ 自定义音频</option>
+          </select>
+        </div>
+        
+        <!-- 仅在选择“自定义输入”时显现 -->
+        <div class="form-group" id="customUrlGroup" style="display: none;">
+          <label>自定义音频 URL 直链</label>
+          <input type="text" id="playUrl" placeholder="请输入 http(s):// 音频直链或 .m3u8 广播流">
+        </div>
+
+        <div class="actions">
+          <button class="primary" id="btnPlayUrl" type="button">播放</button>
+          <button class="ghost" id="btnStopUrl" type="button">停止</button>
+        </div>
+      </div>
+
+      <!-- 选项 B: 本地文件推流 -->
+      <div id="sectionStream" style="display:none; margin-top:14px;">
+        <div class="form-group">
+          <label>选择本地音频文件</label>
+          <input type="file" id="localAudioFile" accept=".mp3,.m4a,.aac,.flac,.wav,audio/*">
+        </div>
+        <div class="actions">
+          <button class="primary" id="btnStartStream" type="button">推流</button>
+          <button class="ghost" id="btnStopStream" type="button">停止</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 运行日志 -->
+    <div class="card">
+      <h2>运行日志</h2>
+      <div class="log-box" id="testLog">等待操作...</div>
+    </div>
+  </div>
+
+  <script>
+    const logBox = document.getElementById("testLog");
+    function appendLog(msg) {
+      const time = new Date().toLocaleTimeString();
+      logBox.textContent += `\n[${time}] ${msg}`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    // 标签切换
+    const tabUrlBtn = document.getElementById("tabUrlBtn");
+    const tabStreamBtn = document.getElementById("tabStreamBtn");
+    const sectionUrl = document.getElementById("sectionUrl");
+    const sectionStream = document.getElementById("sectionStream");
+
+    tabUrlBtn.addEventListener("click", () => {
+      tabUrlBtn.classList.add("active");
+      tabStreamBtn.classList.remove("active");
+      sectionUrl.style.display = "block";
+      sectionStream.style.display = "none";
+    });
+
+    tabStreamBtn.addEventListener("click", () => {
+      tabStreamBtn.classList.add("active");
+      tabUrlBtn.classList.remove("active");
+      sectionStream.style.display = "block";
+      sectionUrl.style.display = "none";
+    });
+
+    // 预置下拉与自定义输入框显隐联动
+    const presetUrlSelect = document.getElementById("presetUrlSelect");
+    const customUrlGroup = document.getElementById("customUrlGroup");
+    const playUrlInput = document.getElementById("playUrl");
+
+    presetUrlSelect.addEventListener("change", () => {
+      if (presetUrlSelect.value === "custom") {
+        customUrlGroup.style.display = "flex";
+        playUrlInput.focus();
+      } else {
+        customUrlGroup.style.display = "none";
+      }
+    });
+
+    function getSelectedAudioUrl() {
+      const sel = presetUrlSelect.value;
+      if (sel === "builtin") {
+        return window.location.origin + "/static/speaker-test.m4a";
+      }
+      if (sel === "custom") {
+        return playUrlInput.value.trim();
+      }
+      return sel;
+    }
+
+    // 内部音频输出实例与 Hls 控制器
+    let internalAudio = new Audio();
+    let hlsInstance = null;
+    let isTestAudioUnlocked = false;
+
+    function initTestAudioUnlock() {
+      function unlock() {
+        if (isTestAudioUnlocked) return;
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (AudioContext) {
+            const ctx = new AudioContext();
+            ctx.resume().then(() => { isTestAudioUnlocked = true; });
+          }
+          isTestAudioUnlocked = true;
+        } catch (e) {}
+        window.removeEventListener("touchstart", unlock);
+        window.removeEventListener("pointerdown", unlock);
+        window.removeEventListener("click", unlock);
+        window.removeEventListener("scroll", unlock);
+      }
+      window.addEventListener("touchstart", unlock, { passive: true });
+      window.addEventListener("pointerdown", unlock, { passive: true });
+      window.addEventListener("click", unlock, { passive: true });
+      window.addEventListener("scroll", unlock, { passive: true });
+    }
+    initTestAudioUnlock();
+
+    function playLocalAudio(url) {
+      if (hlsInstance) {
+        hlsInstance.destroy();
+        hlsInstance = null;
+      }
+      const isM3U8 = url.includes(".m3u8") || url.includes("/live/");
+      const effectiveUrl = (isM3U8 && url.startsWith("http") && !url.startsWith(window.location.origin))
+        ? ("/api/v1/proxy?url=" + encodeURIComponent(url))
+        : url;
+
+      if (isM3U8 && window.Hls && Hls.isSupported()) {
+        hlsInstance = new Hls();
+        hlsInstance.loadSource(effectiveUrl);
+        hlsInstance.attachMedia(internalAudio);
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+          internalAudio.play().catch(() => appendLog("提示：可在页面点击以允许播放"));
+        });
+      } else {
+        internalAudio.src = effectiveUrl;
+        internalAudio.play().catch(() => appendLog("提示：可在页面点击以允许播放"));
+      }
+    }
+
+    function stopLocalAudio() {
+      if (hlsInstance) {
+        hlsInstance.destroy();
+        hlsInstance = null;
+      }
+      internalAudio.pause();
+      internalAudio.src = "";
+    }
+
+    // 1. 初始化加载所有目标音箱
+    async function loadTargets() {
+      try {
+        const res = await fetch("/api/setting").then(r => r.json());
+        const select = document.getElementById("playTarget");
+        const clientIp = res.client_ip || "当前网页";
+        const virtualWebOpt = select.querySelector('option[value="virtual_web"]');
+        if (virtualWebOpt) {
+          virtualWebOpt.textContent = `🌐 Web 浏览器虚拟音箱 (${clientIp})`;
+        }
+        if (res.targets && res.targets.length) {
+          res.targets.forEach(t => {
+            if (t.enabled) {
+              const opt = document.createElement("option");
+              opt.value = t.did || t.id;
+              opt.textContent = `📢 ${t.airplay_name || t.name} (${t.did || t.id})`;
+              select.appendChild(opt);
+            }
+          });
+        }
+      } catch (err) {
+        appendLog("加载音箱列表失败: " + err.message);
+      }
+    }
+    loadTargets();
+
+    // 2. 在线 URL / M3U8 广播测试
+    document.getElementById("btnPlayUrl").addEventListener("click", async () => {
+      const url = getSelectedAudioUrl();
+      const target = document.getElementById("playTarget").value;
+      if (!url) return alert("请输入或选择有效的音频 URL");
+
+      appendLog(`下发播放指令 -> 目标: ${target}, 音频: ${url}`);
+
+      // 若目标是 Web 虚拟音箱
+      if (target === "virtual_web") {
+        playLocalAudio(url);
+        appendLog("Web 虚拟音箱已开始播放音频");
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/v1/control/play", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "play_url", url, target })
+        }).then(r => r.json());
+        appendLog(res.ok ? "播放指令下发成功" : `指令失败: ${res.message}`);
+
+        if (target === "group_all") {
+          playLocalAudio(url);
+        }
+      } catch (err) {
+        appendLog("请求异常: " + err.message);
+      }
+    });
+
+    document.getElementById("btnStopUrl").addEventListener("click", async () => {
+      const target = document.getElementById("playTarget").value;
+      appendLog(`下发停止指令 -> 目标: ${target}`);
+      stopLocalAudio();
+
+      if (target === "virtual_web") {
+        appendLog("已停止 Web 虚拟音箱播放");
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/v1/control/play", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "stop", target })
+        }).then(r => r.json());
+        appendLog(res.ok ? "已通知停止" : `停止失败: ${res.message}`);
+      } catch (err) {
+        appendLog("请求异常: " + err.message);
+      }
+    });
+
+    // 3. 本地音频推流测试
+    let streamAbortController = null;
+    document.getElementById("btnStartStream").addEventListener("click", async () => {
+      const fileInput = document.getElementById("localAudioFile");
+      const target = document.getElementById("playTarget").value;
+      if (!fileInput.files || !fileInput.files[0]) return alert("请先选择本地音频文件");
+      const file = fileInput.files[0];
+      appendLog(`正在读取本地文件: ${file.name}...`);
+
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+        const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        
+        const numChannels = Math.min(2, decoded.numberOfChannels);
+        const length = decoded.length;
+        const pcmBuffer = new Int16Array(length * 2);
+        const left = decoded.getChannelData(0);
+        const right = numChannels > 1 ? decoded.getChannelData(1) : left;
+
+        for (let i = 0; i < length; i++) {
+          pcmBuffer[i * 2] = Math.max(-1, Math.min(1, left[i])) * 32767;
+          pcmBuffer[i * 2 + 1] = Math.max(-1, Math.min(1, right[i])) * 32767;
+        }
+
+        appendLog(`解码完成，开始推流至目标: ${target}...`);
+        
+        if (target === "group_all" || target === "virtual_web") {
+          playLocalAudio("/stream/live.wav?t=" + Date.now());
+        }
+
+        streamAbortController = new AbortController();
+        const res = await fetch("/api/v1/audio/stream", {
+          method: "POST",
+          headers: {
+            "Content-Type": "audio/x-raw",
+            "X-Target-ID": target === "virtual_web" ? "group_all" : target
+          },
+          body: pcmBuffer.buffer,
+          signal: streamAbortController.signal
+        });
+        const json = await res.json();
+        appendLog(json.ok ? "推流已顺利结束" : `推流响应: ${json.message}`);
+      } catch (err) {
+        if (err.name === "AbortError") {
+          appendLog("已手动停止推流");
+        } else {
+          appendLog("推流发生错误: " + err.message);
+        }
+      }
+    });
+
+    document.getElementById("btnStopStream").addEventListener("click", () => {
+      if (streamAbortController) {
+        streamAbortController.abort();
+        streamAbortController = null;
+      }
+      stopLocalAudio();
+    });
+  </script>
+</body>
+</html>

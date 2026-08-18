@@ -143,36 +143,23 @@ class AirPlayMDNS:
                 server=f"{self.hostname}.local.",
             )
 
-            # 尝试注册 RAOP 和 AirPlay 服务
-            # 注意：原注释提到同时注册 _airplay._tcp 可能会让 iOS 优先选择 AirPlay 2，
-            # 但为了让 owntone 能够发现，我们尝试同时注册。
+            # 注册 RAOP 纯音频 AirPlay 服务
             registered = False
-            for attempt in range(3):
+            for attempt in range(2):
+                if not self._running:
+                    return
                 try:
                     self.zeroconf.register_service(self.raop_info, allow_name_change=True)
                     log.info(f"[AirPlay] RAOP 服务已注册: {device_id_clean}@{self.device_name}._raop._tcp.local.")
-                    
-                    try:
-                        self.zeroconf.register_service(self.airplay_info, allow_name_change=True)
-                        log.info(f"[AirPlay] 服务已注册: {self.device_name}._airplay._tcp.local.")
-                    except Exception as e:
-                        log.warning(f"[AirPlay] 服务 (_airplay._tcp) 注册失败: {e}")
-                        
                     registered = True
                     break
-                except (ServiceNameAlreadyRegistered, NonUniqueNameException) as e:
-                    if attempt < 2:
-                        log.warning(f"[AirPlay] RAOP 服务名冲突 ({type(e).__name__})，等待 2 秒后重试 ({attempt+1}/3)...")
-                        # 旧进程重启时 zeroconf 可能还未清理，等待旧服务超时
-                        try:
-                            self.zeroconf.unregister_all_services()
-                        except Exception:
-                            pass
-                        time.sleep(2)
+                except Exception as e:
+                    if attempt == 0:
+                        time.sleep(0.5)
                     else:
-                        raise
+                        log.warning(f"[AirPlay] RAOP 服务注册异常 ({e})，跳过重试")
+
             if not registered:
-                log.error(f"[AirPlay] RAOP 服务注册失败: {device_id_clean}@{self.device_name}._raop._tcp.local.")
                 return
 
             log.info(f"[AirPlay] mDNS 广播已启动")
@@ -180,9 +167,9 @@ class AirPlayMDNS:
             log.info(f"[AirPlay]   设备 ID: {self.device_id}")
             log.info(f"[AirPlay]   RTSP 端口: {self.rtsp_port}")
 
-            # 保持线程运行
+            # 保持线程运行 (快速响应退出)
             while self._running:
-                time.sleep(1)
+                time.sleep(0.2)
 
         except Exception as e:
             log.error(f"[AirPlay] 启动 mDNS 失败: {e}")
@@ -192,29 +179,24 @@ class AirPlayMDNS:
     def stop(self):
         """停止 mDNS 广播"""
         self._running = False
-        if self.zeroconf:
-            if self.raop_info:
-                try:
-                    if self.zeroconf and not self.zeroconf.loop.is_closed():
-                        self.zeroconf.unregister_service(self.raop_info)
-                        log.info(f"[AirPlay] RAOP 服务已注销: {self.device_name}")
-                except Exception as e:
-                    log.error(f"[AirPlay] 注销 RAOP 服务失败: {e}")
-            if self.airplay_info:
-                try:
-                    if self.zeroconf and not self.zeroconf.loop.is_closed():
-                        self.zeroconf.unregister_service(self.airplay_info)
-                        log.info(f"[AirPlay] 服务已注销: {self.device_name}")
-                except Exception as e:
-                    log.error(f"[AirPlay] 注销 AirPlay 服务失败: {e}")
-        # 注意：不关闭共享的 zeroconf，只关闭自己创建的
         if self.zeroconf and not self.shared_zeroconf:
             try:
                 self.zeroconf.close()
             except Exception:
                 pass
-        if self._thread:
-            self._thread.join(timeout=2)
+        elif self.zeroconf and self.shared_zeroconf:
+            try:
+                if self.raop_info and hasattr(self.zeroconf, "unregister_service"):
+                    self.zeroconf.unregister_service(self.raop_info)
+            except Exception:
+                pass
+            try:
+                if self.airplay_info and hasattr(self.zeroconf, "unregister_service"):
+                    self.zeroconf.unregister_service(self.airplay_info)
+            except Exception:
+                pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=0.2)
 
     def update_port(self, port: int):
         """更新 RTSP 端口（动态分配后调用）"""

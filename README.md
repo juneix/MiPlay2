@@ -1,7 +1,7 @@
-# MiPlay 隔空妙播
+# MiPlay 
 
-MiPlay（隔空妙播）是小米音箱的隔空播放`桥接器`，专为苹果用户打造，支持独立 AirPlay 1 设备、首发🔥`MiPlay 全屋组播`、接入 `OwnTone` 等功能。
-> 本项目参考并整合了 [MiAir](https://github.com/KiriChen-Wind/MiAir)、[miair-next](https://github.com/deerwan/miair-next)、[miservice-fork](https://pypi.org/project/miservice-fork/)、[AirPlay2-Receiver](https://github.com/openairplay/airplay2-receiver)、[XiaoMusic](https://github.com/hanxi/xiaomusic) 等项目的思路与部分实现，面向自用场景进行了大量重构。
+MiPlay（隔空妙播）是专为苹果用户和小米音箱打造的**局域网音频中枢**，它可以把小米音箱桥接为 AirPlay 1 设备、首发🔥`MiPlay 全屋组播`，另有 `Web 虚拟音箱`、`开放音频 API`、`兼容 OwnTone` 等开放式玩法。
+> 本项目参考并整合了 [MiAir](https://github.com/KiriChen-Wind/MiAir)、[miair-next](https://github.com/deerwan/miair-next)、[miservice-fork](https://pypi.org/project/miservice-fork/)、[XiaoMusic](https://github.com/hanxi/xiaomusic) 等项目的思路与部分实现，面向自用场景进行了大量重构。
 
 ![miplay-1.webp](./img/miplay-1.webp)
 
@@ -9,15 +9,15 @@ MiPlay（隔空妙播）是小米音箱的隔空播放`桥接器`，专为苹果
 
 ## ✨ 功能特色
 
-- 🚀 **桥接 AirPlay 1**：局域网直连播放
-- 🔥 **全屋组播 Beta**，苹果系统级兼容`小米妙播·全屋播放`
-  - 全屋组播 Beta 本质还是 AirPlay 1
-  - 建议使用 5G WiFi 的音箱
-- 🔥 **接入 OwnTone**：可跨协议实现`多房间播放`
-  - OwnTone 支持 AirPlay 1&2、Chromecast、DLNA 等协议
+- 🚀 **桥接 AirPlay 1**：局域网直连播放，低延迟无损直通
+- 🔥 **全屋组播 Beta**：苹果系统级兼容`小米妙播·全屋播放`
+  - 基于 AirPlay 1，建议 5G WiFi 音箱）
+- 🌐 **Web 虚拟音箱**：打开网页变身虚拟音箱，全屋组播同步发声
+- 🔌 **开放音频 API**：标准的流媒体接口，轻松对接音乐库
+- 🔥 **接入 OwnTone**：可跨协议实现`多房间播放`（OwnTone 支持 AirPlay 1&2、Chromecast、DLNA 等）
 - 📦 **双架构通用**：支持 x86、arm64 架构的 PC、Mac、Linux 设备
 
-> MiPlay 可以实现小米无线音箱 ➡️ AirPlay1，虽然很便利，但普遍音质一般。若想要更好的音质表现，推荐传统有线音箱 ➡️ AirPlay 1&2（🔍 Shairport-Sync）
+> MiPlay 可以实现小米无线音箱 ➡️ AirPlay 1，虽然很便利，但普遍音质一般。若想要更好的音质表现，推荐传统有线音箱 ➡️ AirPlay 1&2（🔍 Shairport-Sync）
 
 ### 📊 音频方案与协议对比
 
@@ -27,7 +27,7 @@ MiPlay（隔空妙播）是小米音箱的隔空播放`桥接器`，专为苹果
 | **多房间同步播放** | ✅ 组播 Beta | ☑️ 仅限 iTunes | ✅ 支持 | ❌ 不支持 | ✅ 支持 |
 | **音频通信链路** | ☑️ 同步串流 | ☑️ 同步串流 | ✅ 独立协同 | ☑️ 分离遥控 | ✅ 独立协同 |
 | **小米音箱兼容性** | ✅ 全系音箱 | ☑️ Sound 系列  | ☑️ Sound 系列 | ☑️ 部分音箱 | ☑️ 部分音箱 |
-| **OwnTone兼容性** | ✅ 支持 | ✅ 支持  | ✅ 支持| ☑️ 部分音箱 | ❌ 不支持 |
+| **OwnTone 兼容性** | ✅ 支持 | ✅ 支持  | ✅ 支持| ☑️ 部分音箱 | ❌ 不支持 |
 | **硬件加密门槛** |  ✅ 无门槛 | ☑️ 苹果授权 | ☑️ 苹果授权 | ✅ 无门槛 | 🔒 小米独占 |
 
 ⚠️ 本项目主要是完善苹果用户的小米音箱 ✖️ AirPlay 体验，暂不考虑 DLNA 功能。
@@ -35,33 +35,42 @@ MiPlay（隔空妙播）是小米音箱的隔空播放`桥接器`，专为苹果
 - 小米小爱音箱自带 DLNA 功能不完整，第三方 DLNA 需额外适配，体验依然不完美
 - 如果需要第三方 DLNA 功能，推荐使用 MiAir、miair-next 等项目
 
-## 🔄 工作流程图
+## 🔄 业务工作流程
 
 ```mermaid
 flowchart TD
-    subgraph Side ["☁️ 云服务"]
+    subgraph TopSide ["☁️ 旁路服务 (云端鉴权 & 开放接口)"]
         direction LR
-        Cloud["☁️ 小米云端 API<br/>(登录鉴权)"] --> Notify["📲 通知推送<br/> (Server酱 / Bark)"]
+        Cloud["☁️ 小米云端 API (登录鉴权)"] --> Notify["📲 通知推送 (Server酱 / Bark)"]
+        Music["🎼 第三方音乐库 / 自动化脚本 (标准 RESTful Audio API)"]
     end
 
-    subgraph LAN ["🌐 局域网"]
+    subgraph MidLAN ["🌐 局域网通道 (音频发射与调度)"]
         direction TD
-        A["📱 iPhone / Mac 发射端<br/>(ALAC / AAC / PCM)"] --> B["📡 MiPlay 服务器 (AirPlay 桥接)<br/>• 无损直通: PCM / WAV<br/>• 动态转码: AAC / MP3"]
-        B --> C{"播放模式"}
+        A["📱 iPhone / Mac 发射端 (AirPlay 1 协议流)"]
+        Server["📡 MiPlay 服务器 (AirPlay 桥接 / 音频调度)"]
         
-        C -->|单播| D["📢 独立 AirPlay 音箱"]
-        C -->|组播| E
+        A --> Server
+        Music -.->|API 推流 / 控制| Server
+    end
+
+    subgraph BottomOut ["🔊 音频输出 (单播 / 组播)"]
+        direction TD
+        Server --> Mode{"播放模式"}
         
-        subgraph E ["🏠 全屋播放"]
+        Mode -->|独立单播| Single["📢 独立 AirPlay 音箱"]
+        Mode -->|全屋组播| Group
+        
+        subgraph Group ["🏠 同步播放 (Beta)"]
             direction LR
-            E1["📢 音箱 1"] --- E2["📢 音箱 2"] --- E3["📢 音箱 N..."]
+            E1["📢 音箱 1"] --- E2["📢 音箱 2"] --- E3["📱 Web 虚拟音箱"]
         end
     end
 
-    Side -.- LAN
+    TopSide --> MidLAN
 ```
 
-### 🔐 **小米账号鉴权说明**：
+### 🔐 小米账号鉴权说明：
 1. **登录方式区别？**
   - **米家 App 扫码登录 (推荐)**：  
     官方渠道获取长效凭证 `passToken`，支持长期无感自动续期。
@@ -74,14 +83,10 @@ flowchart TD
 4. **安全风险提示**  
 ⚠️ 小米的 `passToken` 请勿公开泄露，本项目纯内网个人使用，Web 控制台不设置密码访问限制。如需外网调试，推荐使用 `Tailscale` 或 `Zerotier` 更安全。
 
-
 ### 🎵 音频处理与格式支持
 
-| 环节 | 格式 / 协议 | 说明 |
-| :--- | :--- | :--- |
-| **AirPlay 输入** | **ALAC (Apple Lossless)**, **AAC**, **PCM** | 44.1kHz / 16bit 音频接收 |
-| **无损直通 (默认)** | **WAV / PCM 局域网 HTTP 流** | 零二次压缩开销，CPU 占用极低，无损高品质输出 |
-| **动态转码 (兼容)** | **AAC / MP3** | 针对特定曲库 API 音箱动态封装，保证最高兼容性 |
+* **原生直连格式**：`.mp3` · `.m4a` · `.flac` · `.wav` · `.m3u8`（小米音箱硬件原生拉流解码，本地 0 转码、0 资源占用）；
+* **中转转码扩展**：搭配 **FFmpeg** 或浏览器原生 Web Audio 解码，可转码兼容任意音频格式推流至全屋。
 
 ### 🔊 音量说明
 

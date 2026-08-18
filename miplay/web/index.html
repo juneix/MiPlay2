@@ -1725,6 +1725,38 @@
       notifyHint: null
     };
 
+    let currentClientIp = window.location.hostname || "127.0.0.1";
+    let isAudioUnlocked = false;
+    let virtualRelayAudio = null;
+
+    function initAudioAutoplayUnlock() {
+      function unlock() {
+        if (isAudioUnlocked) return;
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (AudioContext) {
+            const ctx = new AudioContext();
+            ctx.resume().then(() => {
+              isAudioUnlocked = true;
+            });
+          }
+          if (!virtualRelayAudio) {
+            virtualRelayAudio = new Audio();
+          }
+          isAudioUnlocked = true;
+        } catch (e) {}
+        window.removeEventListener("touchstart", unlock);
+        window.removeEventListener("pointerdown", unlock);
+        window.removeEventListener("click", unlock);
+        window.removeEventListener("scroll", unlock);
+      }
+
+      window.addEventListener("touchstart", unlock, { passive: true });
+      window.addEventListener("pointerdown", unlock, { passive: true });
+      window.addEventListener("click", unlock, { passive: true });
+      window.addEventListener("scroll", unlock, { passive: true });
+    }
+
     document.addEventListener("DOMContentLoaded", init);
 
     function escapeHtml(value) {
@@ -1857,6 +1889,7 @@
     async function init() {
       initDefaultHintHTMLs();
       initTheme();
+      initAudioAutoplayUnlock();
       bindEvents();
 
       const modal = document.getElementById("about_modal");
@@ -2032,6 +2065,9 @@
       const data = await parseJsonResponse(response);
       currentSetting = data;
       currentTargets = data.targets || [];
+      if (data.client_ip) {
+        currentClientIp = data.client_ip;
+      }
       if (data.group) {
         currentGroup = data.group;
       }
@@ -2074,7 +2110,9 @@
     async function fetchRuntimeTargets() {
       const response = await fetch(withCacheBuster("/api/targets"), { cache: "no-store" });
       runtimeTargets = await parseJsonResponse(response);
-      renderDeviceList();
+      if (discoveredDevices.length || currentTargets.length) {
+        renderDeviceList();
+      }
       return runtimeTargets;
     }
 
@@ -2154,7 +2192,15 @@
       const savedMap = new Map((currentTargets || []).map((item) => [item.did, item]));
 
       // 过滤掉任何列表内可能混入的 Dummy 虚拟设备
-      const realDevices = discoveredDevices.filter(d => (d.miotDID || "") !== "group_all");
+      let realDevices = discoveredDevices.filter(d => (d.miotDID || "") !== "group_all" && (d.miotDID || "") !== "virtual_relay");
+      if (!realDevices.length && currentTargets && currentTargets.length && currentSetting.xiaomi?.has_credentials) {
+        realDevices = currentTargets.map(t => ({
+          miotDID: t.did,
+          name: t.name,
+          hardware: t.hardware,
+          deviceID: t.device_id
+        }));
+      }
 
       if (!realDevices.length) {
         if (currentDeviceListError) {
@@ -2162,7 +2208,7 @@
         } else if (!currentSetting.xiaomi?.has_credentials) {
           container.innerHTML = '<div class="loading">请先登录并同步设备</div>';
         } else {
-          container.innerHTML = '<div class="loading">未发现设备，请先同步。</div>';
+          container.innerHTML = '<div class="loading">正在加载设备列表…</div>';
         }
         document.getElementById("panelBadge").style.display = "none";
         return;
@@ -2184,8 +2230,9 @@
       const groupArtwork = groupRuntime.artwork;
       const groupSongTitle = groupMetadata.title || "";
       const groupSongArtist = groupMetadata.artist || "";
+      const groupPortText = groupRuntime.rtsp_port ? groupRuntime.rtsp_port : "n/a";
 
-      container.innerHTML = realDevices.map((device) => {
+      const devicesHtml = realDevices.map((device) => {
         const did = device.miotDID || "";
         const saved = savedMap.get(did) || {};
         const runtime = runtimeMap.get(did) || {};
@@ -2293,13 +2340,79 @@
       }).join("");
 
       // ============================================================
+      // 浏览器虚拟中转节点 (MiPlay 中转 · Beta)
+      // ============================================================
+      const clientHost = currentClientIp || window.location.hostname || "127.0.0.1";
+      const relayChecked = true;
+      const relayDot = groupPlaying ? "playing" : "idle";
+      const relayStatus = groupPlaying ? (groupSongTitle ? `${escapeHtml(groupSongArtist)} - ${escapeHtml(groupSongTitle)}` : "中转播放中") : "待命";
+      const relayPortText = "n/a";
+
+      // 联动手机浏览器虚拟音箱音频发声
+      if (currentMode === "group" && groupPlaying && isAudioUnlocked && virtualRelayAudio) {
+        if (virtualRelayAudio.paused) {
+          virtualRelayAudio.src = "/stream/live.wav?t=" + Date.now();
+          virtualRelayAudio.play().catch(() => {});
+        }
+      } else if (!groupPlaying && virtualRelayAudio && !virtualRelayAudio.paused) {
+        virtualRelayAudio.pause();
+        virtualRelayAudio.src = "";
+      }
+
+      const relayHtml = `
+        <div class="device-row" data-did="virtual_relay">
+          <input class="device-check" type="checkbox" data-role="virtual-relay" ${relayChecked ? "checked" : ""} disabled>
+          <div class="device-card enabled">
+            <div class="device-main">
+              <div class="device-image" style="background-image:url('static/icon.png'); background-size:contain; background-color:rgba(0,0,0,0.03);"></div>
+              <div class="device-info">
+                <div class="info-line top">
+                  <div class="name-editor" data-role="name-editor">
+                    <span class="name-display" data-role="name-display">${escapeHtml(clientHost)}</span>
+                  </div>
+                  <div class="model-text pc-only">MiPlay 中转 · Beta</div>
+                </div>
+                <div class="info-line mobile-only">
+                  <div class="model-text">MiPlay 中转 · Beta</div>
+                </div>
+                <div class="info-line bottom pc-only">
+                  <div class="status-note">
+                    <span class="status-dot ${relayDot}"></span>
+                    <span class="status-text">${relayStatus}</span>
+                  </div>
+                  <div class="device-status">
+                    <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
+                    <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                      ${escapeHtml(relayPortText)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="info-line bottom mobile-only">
+              <div class="status-note">
+                <span class="status-dot ${relayDot}"></span>
+                <span class="status-text">${relayStatus}</span>
+              </div>
+              <div class="device-status">
+                <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
+                <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                  ${escapeHtml(relayPortText)}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      // ============================================================
       // 全屋虚拟 Dummy 设备卡片 (仅全屋模式下显示)
       // ============================================================
+      let dummyHtml = "";
       if (currentMode === "group") {
         const groupName = (currentGroup.airplay_name || "MiPlay 全屋播放").trim();
-        const groupPortText = groupRuntime.rtsp_port ? groupRuntime.rtsp_port : "n/a";
-        const groupChecked = true; // 全屋模式下默认勾选
-        const groupDisabled = true; // 全屋模式下不可取消
+        const groupChecked = true;
+        const groupDisabled = true;
         const groupDot = groupPlaying ? "playing" : "idle";
 
         let groupStatus = "待命";
@@ -2314,7 +2427,7 @@
         }
         const groupDisplayImage = (groupPlaying && groupArtwork) ? groupArtwork : 'static/icon.png';
 
-        const dummyHtml = `
+        dummyHtml = `
           <div class="device-row" data-did="group_all">
             <input class="device-check" type="checkbox" data-role="group-dummy" ${groupChecked ? "checked" : ""} ${groupDisabled ? "disabled" : ""}>
             <div class="device-card enabled">
@@ -2338,6 +2451,7 @@
                       <span class="status-text">${groupStatus}</span>
                     </div>
                     <div class="device-status">
+                      <span class="wifi-badge wifi-5g" title="虚拟组播"><i data-lucide="radio"></i></span>
                       <span class="status-chip ${groupPlaying ? 'playing' : ''}">
                         ${escapeHtml(groupPortText)}
                       </span>
@@ -2351,6 +2465,7 @@
                   <span class="status-text">${groupStatus}</span>
                 </div>
                 <div class="device-status">
+                  <span class="wifi-badge wifi-5g" title="虚拟组播"><i data-lucide="radio"></i></span>
                   <span class="status-chip ${groupPlaying ? 'playing' : ''}">
                     ${escapeHtml(groupPortText)}
                   </span>
@@ -2359,13 +2474,13 @@
             </div>
           </div>
         `;
-
-        // Dummy 设备排在最前 (仅全屋模式)
-        container.innerHTML = dummyHtml + container.innerHTML;
       }
 
+      // 一次性原子写入 DOM：全屋模式包含全屋主控与虚拟从端，普通模式仅展示真实小米音箱
+      container.innerHTML = (currentMode === "group" ? (dummyHtml + relayHtml) : "") + devicesHtml;
+
       if (window.lucide) {
-        lucide.createIcons();
+        window.lucide.createIcons();
       }
 
       if (currentMode === "group") {
@@ -2699,9 +2814,9 @@
     }
 
     function collectTargets() {
-      // 过滤掉全屋虚拟 Dummy 设备 (data-did="group_all")
+      // 过滤掉全屋虚拟 Dummy 设备 (data-did="group_all") 与虚拟中转节点 (data-did="virtual_relay")
       const rows = Array.from(document.querySelectorAll("#deviceList .device-row")).filter(
-        row => row.dataset.did !== "group_all"
+        row => row.dataset.did !== "group_all" && row.dataset.did !== "virtual_relay"
       );
       if (!rows.length && currentTargets && currentTargets.length) {
         return currentTargets;

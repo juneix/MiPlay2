@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 import sys
 
+import aiohttp
 from aiohttp import web
 
 from miplay.config import Config
@@ -46,9 +47,15 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         index_path = os.path.join(os.path.dirname(__file__), "index.html")
         return web.FileResponse(index_path)
 
+    async def handle_test_page(request: web.Request):
+        test_path = os.path.join(os.path.dirname(__file__), "test.html")
+        return web.FileResponse(test_path)
+
     async def handle_get_setting(request: web.Request):
         need_device_list = request.query.get("need_device_list", "false") == "true"
+        client_ip = request.remote or "127.0.0.1"
         payload = {
+            "client_ip": client_ip,
             "xiaomi": {
                 "account": config.xiaomi.account,
                 "cookie": config.xiaomi.cookie,
@@ -220,21 +227,162 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         return web.json_response(app_instance.get_runtime_targets())
 
     async def handle_status(request: web.Request):
-        return web.json_response(app_instance.get_status_snapshot())
+        res = app_instance.get_status_snapshot()
+        res["client_ip"] = request.remote or "127.0.0.1"
+        return web.json_response(res)
 
-    async def handle_control(request: web.Request):
-        data = await request.json()
-        target_id = data.get("id")
-        action = data.get("action")
-        if not target_id or not action:
-            return web.json_response({"ok": False, "message": "Missing id or action"}, status=400)
+    async def handle_stream_live_wav(request: web.Request) -> web.StreamResponse:
+        """Egress 实时音频广播流 (支持手机浏览器、自研 APK、VLC 等即开即听)。"""
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "audio/wav",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Connection": "close",
+                "Transfer-Encoding": "chunked",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+        await response.prepare(request)
+
+        # 注册成为 Egress 监听队列
+        queue_listener = app_instance.audio_hub.create_listener_queue()
         try:
-            ok = await app_instance.control_target(target_id, action)
-            return web.json_response({"ok": ok})
+            # 写入标准 WAV 头部 (44.1k/16bit/2ch)
+            await response.write(app_instance.audio_hub.build_wav_header())
+
+            loop = asyncio.get_running_loop()
+            while True:
+                # 非阻塞等待队列中的 PCM 音频数据
+                chunk = await loop.run_in_executor(None, queue_listener.get)
+                if chunk is None:
+                    break
+                await response.write(chunk)
+        except Exception:
+            pass
+        finally:
+            app_instance.audio_hub.remove_listener_queue(queue_listener)
+        return response
+
+    async def handle_audio_stream_ingest(request: web.Request) -> web.Response:
+        """Ingest 实时音频推流 (外部自研音乐工具/脚本持续推流到小米音箱)。"""
+        if not app_instance.audio_hub.start_source("api_ingest"):
+            return web.json_response(
+                {"ok": False, "message": "AirPlay 正在播放中或通道繁忙，拒绝推流"},
+                status=409,
+            )
+
+        target = request.headers.get("X-Target-ID") or request.query.get("target", "group_all")
+        stream_server = app_instance.get_active_audio_stream_server()
+        stream_url = stream_server.stream_url if stream_server else f"http://{config.host}:{config.web_port}/stream/live.wav"
+
+        if stream_server:
+            stream_server.start_streaming()
+
+        # 下发播放指令给目标音箱
+        await app_instance.play_url_to_targets(target, stream_url)
+        log.info("[AudioHub] 外部 API 推流已连接，下发播放目标: %s", target)
+
+        try:
+            async for chunk, _ in request.content.iter_chunks():
+                if chunk:
+                    if stream_server:
+                        stream_server.write_pcm(chunk)
+                    app_instance.audio_hub.broadcast_pcm(chunk)
+            return web.json_response({"ok": True, "message": "推流完成"})
         except Exception as exc:
+            log.warning("[AudioHub] 外部 API 推流中断: %s", exc)
             return web.json_response({"ok": False, "message": str(exc)}, status=500)
+        finally:
+            app_instance.audio_hub.stop_source("api_ingest")
+            if stream_server:
+                stream_server.stop_streaming()
+            await app_instance.stop_targets(target)
+            log.info("[AudioHub] 外部 API 推流已结束并通知音箱停止: %s", target)
+
+    async def handle_control_play(request: web.Request) -> web.Response:
+        """通用音频播放与控制指令 RPC 接口 (兼容 /api/control 与 /api/v1/control/play)。"""
+        data = await request.json()
+        action = data.get("action", "play_url")
+        target = data.get("target") or data.get("id") or "group_all"
+        url = data.get("url", "")
+        volume = data.get("volume")
+
+        if action == "play_url":
+            if not url:
+                return web.json_response({"ok": False, "message": "Missing url"}, status=400)
+            ok = await app_instance.play_url_to_targets(target, url)
+            return web.json_response({"ok": ok})
+        elif action in ("stop", "pause"):
+            ok = await app_instance.stop_targets(target)
+            return web.json_response({"ok": ok})
+        elif action == "set_volume":
+            if volume is None:
+                return web.json_response({"ok": False, "message": "Missing volume"}, status=400)
+            ok = await app_instance.set_volume_to_targets(target, int(volume))
+            return web.json_response({"ok": ok})
+        else:
+            return web.json_response({"ok": False, "message": f"Unsupported action: {action}"}, status=400)
+
+    async def handle_hub_status(request: web.Request) -> web.Response:
+        """获取 Audio Hub 运行状态与监听者统计。"""
+        return web.json_response(app_instance.audio_hub.get_status())
+
+    async def handle_proxy(request: web.Request) -> web.StreamResponse:
+        """通用音频流 / 封面图透明反向代理 (解除浏览器 CORS 与防盗链限制)。"""
+        url = request.query.get("url", "").strip()
+        if not url:
+            return web.Response(status=400, text="Missing url parameter")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": url,
+        }
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as upstream:
+                    content_type = upstream.headers.get("Content-Type", "")
+                    # 若为 M3U8 播放列表文本，自动补齐重写内部切片路径
+                    if "mpegurl" in content_type.lower() or "m3u8" in content_type.lower() or url.endswith(".m3u8"):
+                        text = await upstream.text(encoding="utf-8", errors="ignore")
+                        from urllib.parse import urljoin
+                        lines = []
+                        for line in text.splitlines():
+                            line_s = line.strip()
+                            if line_s and not line_s.startswith("#"):
+                                full_chunk_url = urljoin(url, line_s)
+                                lines.append(f"/api/v1/proxy?url={full_chunk_url}")
+                            else:
+                                lines.append(line)
+                        rewritten = "\n".join(lines).encode("utf-8")
+                        return web.Response(
+                            body=rewritten,
+                            content_type="application/vnd.apple.mpegurl",
+                            headers={
+                                "Access-Control-Allow-Origin": "*",
+                                "Cache-Control": "no-cache",
+                            },
+                        )
+
+                    # 媒体切片 / 普通音频 / 封面图二进制透传
+                    resp = web.StreamResponse(
+                        status=upstream.status,
+                        headers={
+                            "Content-Type": content_type or "application/octet-stream",
+                            "Access-Control-Allow-Origin": "*",
+                            "Cache-Control": "no-cache",
+                        },
+                    )
+                    await resp.prepare(request)
+                    async for chunk in upstream.content.iter_chunked(65536):
+                        await resp.write(chunk)
+                    return resp
+        except Exception as exc:
+            return web.Response(status=502, text=f"Proxy error: {exc}", headers={"Access-Control-Allow-Origin": "*"})
 
     web_app.router.add_get("/", handle_index)
+    web_app.router.add_get("/test", handle_test_page)
     web_app.router.add_get("/api/setting", handle_get_setting)
     web_app.router.add_post("/api/setting", handle_save_setting)
     web_app.router.add_post("/api/notify/test", handle_test_notify)
@@ -247,7 +395,15 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     web_app.router.add_get("/api/devices", handle_get_devices)
     web_app.router.add_get("/api/targets", handle_get_targets)
     web_app.router.add_get("/api/status", handle_status)
-    web_app.router.add_post("/api/control", handle_control)
+    web_app.router.add_post("/api/control", handle_control_play)
+
+    # 开放 Ingest 与 Egress 音频中枢端点
+    web_app.router.add_get("/stream/live.wav", handle_stream_live_wav)
+    web_app.router.add_get("/stream/group.wav", handle_stream_live_wav)
+    web_app.router.add_post("/api/v1/audio/stream", handle_audio_stream_ingest)
+    web_app.router.add_post("/api/v1/control/play", handle_control_play)
+    web_app.router.add_get("/api/v1/hub/status", handle_hub_status)
+    web_app.router.add_get("/api/v1/proxy", handle_proxy)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.exists(static_dir):

@@ -95,6 +95,8 @@ class AudioStreamServer:
         self._client_lock = threading.Lock()
         self._broadcaster: threading.Thread | None = None
         self._bootstrap_pcm = b""
+        self.on_pcm_chunk: Callable[[bytes], None] | None = None
+        self.on_streaming_state_change: Callable[[bool], None] | None = None
 
         self._setup_routes()
 
@@ -103,6 +105,11 @@ class AudioStreamServer:
             self._app.router.add_get("/airplay/stream.mp3", self._handle_stream_mp3)
         else:
             self._app.router.add_get("/airplay/stream.wav", self._handle_stream_wav)
+
+        # 开放通用 Egress 实时音频流别名 (支持浏览器、自研 APK、车机等多端直连拉流)
+        self._app.router.add_get("/stream/live.wav", self._handle_stream_wav)
+        self._app.router.add_get("/stream/group.wav", self._handle_stream_wav)
+        self._app.router.add_get("/stream/live.mp3", self._handle_stream_mp3)
 
     @property
     def stream_url(self) -> str:
@@ -208,6 +215,11 @@ class AudioStreamServer:
             self._broadcaster = threading.Thread(target=self._broadcaster_loop, daemon=True)
             self._broadcaster.start()
         log.info("[Audio] 开始接收 PCM 数据 (格式: %s)", self._pcm_format.describe())
+        if self.on_streaming_state_change:
+            try:
+                self.on_streaming_state_change(True)
+            except Exception:
+                pass
 
     def stop_streaming(self):
         self._active = False
@@ -228,6 +240,11 @@ class AudioStreamServer:
                 except queue.Full:
                     pass
         log.info("[Audio] 停止接收 PCM 数据")
+        if self.on_streaming_state_change:
+            try:
+                self.on_streaming_state_change(False)
+            except Exception:
+                pass
 
     def write_pcm(self, data: bytes, *, bootstrap: bool = False):
         """写入 PCM 音频数据 — 非阻塞写入主缓冲区并自动广播"""
@@ -236,6 +253,11 @@ class AudioStreamServer:
         if bootstrap:
             self._bootstrap_pcm = bytes(data)
             return
+        if self.on_pcm_chunk:
+            try:
+                self.on_pcm_chunk(data)
+            except Exception:
+                pass
         try:
             self._audio_queue.put_nowait(data)
         except queue.Full:

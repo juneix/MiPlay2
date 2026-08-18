@@ -59,7 +59,9 @@ def main():
     main_task = loop.create_task(app.run_forever())
 
     def shutdown():
-        main_task.cancel()
+        import os
+        # 立即退出，防止 zeroconf 注销死锁导致卡死
+        os._exit(0)
 
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGINT, shutdown)
@@ -72,7 +74,7 @@ def main():
     finally:
         if not loop.is_closed():
             try:
-                loop.run_until_complete(asyncio.wait_for(app.stop(), timeout=5.0))
+                loop.run_until_complete(asyncio.wait_for(app.stop(), timeout=1.5))
             except Exception:
                 pass
             finally:

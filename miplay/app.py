@@ -19,6 +19,7 @@ import time
 
 from aiohttp import web
 
+from miplay.audio_hub import AudioHub
 from miplay.bridge import BridgeManager
 from miplay.config import Config, build_external_status, detect_name_conflicts
 from miplay.logger import ColoredFormatter, PlainTextFormatter, RateLimitFilter
@@ -36,6 +37,7 @@ class MiPlay:
         self.auth = AuthManager(config)
         self.target_manager = TargetManager(config, self.auth)
         self.bridge_manager: BridgeManager | None = None
+        self.audio_hub = AudioHub(self)
         self._web_runner: web.AppRunner | None = None
         self.running = False
         self.status_message = ""
@@ -56,6 +58,7 @@ class MiPlay:
     async def start(self):
         self._setup_logging()
         self._refresh_warnings()
+        self.audio_hub.set_loop(asyncio.get_running_loop())
         web_app = create_web_app(self.config, self)
         self._web_runner = web.AppRunner(web_app, access_log=None)
         await self._web_runner.setup()
@@ -81,7 +84,7 @@ class MiPlay:
                 self.status_message = "No Xiaomi targets are ready; sync devices and verify credentials."
                 log.warning(self.status_message)
                 return
-            self.bridge_manager = BridgeManager(self.config.host, self.config)
+            self.bridge_manager = BridgeManager(self.config.host, self.config, self.audio_hub)
             await self.bridge_manager.start_for_targets(self.target_manager.controllers)
             self.running = True
             self.status_message = f"MiPlay running with {len(self.target_manager.controllers)} Xiaomi AirPlay target(s)."
@@ -116,7 +119,10 @@ class MiPlay:
         snapshots = {}
         if self.bridge_manager:
             for item in self.bridge_manager.snapshot():
-                snapshots[item["id"]] = item
+                if item.get("id"):
+                    snapshots[item["id"]] = item
+                if item.get("did"):
+                    snapshots[item["did"]] = item
 
         result = []
         for target in self.config.targets:
@@ -134,7 +140,8 @@ class MiPlay:
                 "artwork": None,
                 "rtsp_port": 0,
             }
-            item.update(snapshots.get(target.id, {}))
+            snap = snapshots.get(target.did) or snapshots.get(target.id) or {}
+            item.update(snap)
             result.append(item)
 
         # 包含全屋虚拟分组 group_all 的运行时快照数据 (包含实际 RTSP 端口号)
@@ -142,6 +149,17 @@ class MiPlay:
             result.append(snapshots["group_all"])
 
         return result
+
+    def get_active_audio_stream_server(self):
+        """获取当前全屋组播或首个桥接器的音频流服务。"""
+        if self.bridge_manager:
+            server = self.bridge_manager.get_group_audio_stream_server()
+            if server:
+                return server
+            for bridge in self.bridge_manager.bridges.values():
+                if bridge.airplay_server and bridge.airplay_server.audio_stream:
+                    return bridge.airplay_server.audio_stream
+        return None
 
     def get_status_snapshot(self) -> dict:
         external = build_external_status(self.config)
@@ -155,18 +173,61 @@ class MiPlay:
             "status_message": self.status_message,
             "warnings": self.warnings,
             "external": external,
+            "hub": self.audio_hub.get_status() if self.audio_hub else {},
         }
+
+    async def play_url_to_targets(self, target: str, url: str) -> bool:
+        """下发拉流 URL 到全屋组播或单个音箱。"""
+        if target in ("group_all", "group", "all"):
+            if self.bridge_manager and hasattr(self.bridge_manager, "group_controller") and self.bridge_manager.group_controller:
+                return await self.bridge_manager.group_controller.play_url(url)
+            log.warning("No active group controller for group play_url")
+            return False
+        
+        controller = self.target_manager.controllers.get(target)
+        if not controller:
+            # 尝试通过 did 查找
+            for ctrl in self.target_manager.controllers.values():
+                if ctrl.did == target:
+                    controller = ctrl
+                    break
+        if controller:
+            return await controller.play_url(url)
+        log.warning("Target speaker %s not found for play_url", target)
+        return False
+
+    async def stop_targets(self, target: str = "group_all") -> bool:
+        """通知全屋组播或单个音箱停止播放。"""
+        if target in ("group_all", "group", "all"):
+            if self.bridge_manager and hasattr(self.bridge_manager, "group_controller") and self.bridge_manager.group_controller:
+                return await self.bridge_manager.group_controller.stop()
+            return True
+        controller = self.target_manager.controllers.get(target)
+        if controller:
+            return await controller.stop()
+        return True
+
+    async def set_volume_to_targets(self, target: str, volume: int) -> bool:
+        """调整全屋组播或单个音箱的音量。"""
+        if target in ("group_all", "group", "all"):
+            if self.bridge_manager and hasattr(self.bridge_manager, "group_controller") and self.bridge_manager.group_controller:
+                return await self.bridge_manager.group_controller.set_volume(volume)
+            return False
+        controller = self.target_manager.controllers.get(target)
+        if controller:
+            return await controller.set_volume(volume)
+        return False
 
     async def control_target(self, target_id: str, action: str) -> bool:
         controller = self.target_manager.controllers.get(target_id)
         if not controller:
             raise ValueError(f"Target {target_id} not active")
         
-        if action == "pause":
-            # AirPlay bridge does not support reverse control reliably
-            return False
+        if action == "stop":
+            return await controller.stop()
+        elif action == "pause":
+            return await controller.pause()
         elif action == "play":
-            # AirPlay bridge does not support reverse control reliably
             return False
         return False
 
