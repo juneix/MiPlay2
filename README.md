@@ -41,7 +41,7 @@ MiPlay（隔空妙播）是专为苹果用户和小米音箱打造的**局域网
 flowchart TD
     subgraph Side ["☁️ 旁路服务"]
         direction LR
-        Cloud["☁️ 小米云端 API (登录鉴权)"] --> Notify["📲 通知推送 (Server酱 / Bark)"]
+        Cloud["🔑 小米云端 API<br/>(登录鉴权)"] --> Notify["📲 通知推送<br/>(Server酱 / Bark)"]
     end
 
     subgraph LAN ["🌐 局域网通道"]
@@ -51,12 +51,12 @@ flowchart TD
         
         B --> C{"播放模式"}
         
-        C -->|独立单播| D["📢 独立 AirPlay 音箱"]
+        C -->|独立单播| D["📢 小米音箱 1<br/>(AirPlay)"]
         C -->|全屋组播| E
         
-        subgraph E ["🏠 同步播放"]
+        subgraph E ["🏠 虚拟中转 (AirPlay)"]
             direction LR
-            E1["📢 音箱 1"] --- E2["📢 音箱 2"] --- E3["📱 Web 虚拟音箱"]
+            E1["📢 小米音箱 1<br/>(HTTP)"] --- E2["📢 小米音箱 2<br/>(HTTP)"] --- E3["📱 Web 虚拟音箱<br/>(HTTP)"]
         end
     end
 
