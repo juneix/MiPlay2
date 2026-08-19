@@ -1663,7 +1663,7 @@
     // 用途: 将小米音箱的硬件型号 (hardware) 映射为界面展示信息。
     // 字段说明:
     //   model  - 设备显示名称 (展示在设备卡片型号位)
-    //   image  - 设备图片文件名 (位于 /static/devicespic/ 目录)
+    //   image  - 设备图片文件名 (位于 /static/models/ 目录)
     //   wifi   - 设备【原生支持】的 WiFi 频段: "5G" 或 "2.4G"
     //            ⚠️ 仅代表硬件能力, 不代表真实连接状态
     //   airplay- 设备【原生支持】AirPlay 与否: true / false
@@ -1673,35 +1673,41 @@
     //   model/image/wifi/airplay 四个字段完整。
     // ============================================================
     const deviceModelMap = {
-      // ---- 2.4G 系列 ----
-      "L06A": { model: "小爱音箱", image: "L06A.webp", wifi: "2.4G", airplay: false },
-      "L07A": { model: "Redmi 小爱音箱 Play", image: "L07A.webp", wifi: "2.4G", airplay: false },
-      "S12": { model: "小米 AI 音箱", image: "S12_S12A_MDZ-25-DA.webp", wifi: "2.4G", airplay: false },
-      "S12A": { model: "小米 AI 音箱", image: "S12_S12A_MDZ-25-DA.webp", wifi: "2.4G", airplay: false },
-      "MDZ-25-DA": { model: "小米 AI 音箱", image: "S12_S12A_MDZ-25-DA.webp", wifi: "2.4G", airplay: false },
-      "LX5A": { model: "小爱音箱 万能遥控版", image: "LX5A.webp", wifi: "2.4G", airplay: false },
-      "LX05": { model: "小爱音箱 Play (2019款)", image: "LX05.webp", wifi: "2.4G", airplay: false },
+      // ---- 2.4G 系列 (基础 / 入门 / 便携款) ----
       "LX01": { model: "小爱音箱 mini", image: "LX01.webp", wifi: "2.4G", airplay: false },
-      "L05B": { model: "小爱音箱 Play", image: "L05B.webp", wifi: "2.4G", airplay: false },
-      "L05C": { model: "小爱音箱 Play 增强版", image: "L05C.webp", wifi: "2.4G", airplay: false },
-      "LX04": { model: "小爱触屏音箱", image: "LX04_X10A_X08A.webp", wifi: "2.4G", airplay: false },
-      "X10A": { model: "小爱触屏音箱", image: "LX04_X10A_X08A.webp", wifi: "2.4G", airplay: false },
-      "X08A": { model: "小爱触屏音箱", image: "LX04_X10A_X08A.webp", wifi: "2.4G", airplay: false },
-      "X08C": { model: "小米触屏音箱", image: "X08C_X08E_X8F.webp", wifi: "2.4G", airplay: false },
-      "X08E": { model: "小米触屏音箱", image: "X08C_X08E_X8F.webp", wifi: "2.4G", airplay: false },
-      "X8F": { model: "小米触屏音箱", image: "X08C_X08E_X8F.webp", wifi: "2.4G", airplay: false },
-      // ---- 5G 系列 ----
-      "L15A": { model: "小米AI音箱（第二代）", image: "L15A.webp", wifi: "5G", airplay: false },
+      "LX04": { model: "小爱触屏音箱", image: "LX04.webp", wifi: "2.4G", airplay: false },
+      "LX05": { model: "小爱音箱 Play", image: "LX05.webp", wifi: "2.4G", airplay: false },
+      "LX5A": { model: "小爱音箱 万能遥控版", image: "LX5A.webp", wifi: "2.4G", airplay: false },
+      "L07A": { model: "Redmi 小爱音箱 Play", image: "L07A.webp", wifi: "2.4G", airplay: false },
+      "X08C": { model: "Redmi 小爱触屏音箱 8", image: "X08C_X08E.webp", wifi: "2.4G", airplay: false },
+      "L05B": { model: "小米小爱音箱 Play", image: "L05B.webp", wifi: "2.4G", airplay: false },
+      "L05C": { model: "小米小爱音箱 Play 增强版", image: "L05C.webp", wifi: "2.4G", airplay: false },
+      "X6A": { model: "Xiaomi 智能家庭屏 6", image: "X6A.webp", wifi: "2.4G", airplay: false },
+      "ASX4B": { model: "Xiaomi 智能家庭屏 Mini", image: "ASX4B_X4B.webp", wifi: "2.4G", airplay: false },
+      "X4B": { model: "Xiaomi 智能家庭屏 Mini", image: "ASX4B_X4B.webp", wifi: "2.4G", airplay: false },
+
+      // ---- 5G 系列 (双频 / 大屏中枢 / 高保真) ----
+      "S12": { model: "小米 AI 音箱", image: "S12_S12A.webp", wifi: "5G", airplay: false },
+      "S12A": { model: "小米 AI 音箱", image: "S12_S12A.webp", wifi: "5G", airplay: false },
+      "M01": { model: "小米小爱音箱 HD", image: "M01.webp", wifi: "5G", airplay: false },
+      "L06A": { model: "小爱音箱", image: "L06A.webp", wifi: "5G", airplay: false },
       "LX06": { model: "小爱音箱 Pro", image: "LX06.webp", wifi: "5G", airplay: false },
+      "X08A": { model: "小米小爱触屏音箱 Pro 8", image: "X08A.webp", wifi: "5G", airplay: false },
       "L09A": { model: "小爱音箱 Art", image: "L09A.webp", wifi: "5G", airplay: false },
+      "X08E": { model: "Redmi 小爱触屏音箱 Pro 8", image: "X08C_X08E.webp", wifi: "5G", airplay: false },
       "L09B": { model: "小爱音箱 Art 电池版", image: "L09B.webp", wifi: "5G", airplay: false },
-      "M01": { model: "小爱音箱 HD", image: "L05B.webp", wifi: "5G", airplay: false },
-      "XMYX01JY": { model: "小爱音箱 HD", image: "L05B.webp", wifi: "5G", airplay: false },
-      "OH2P": { model: "Xiaomi 智能音箱 Pro", image: "OH2P.webp", wifi: "5G", airplay: false },
+      "L15A": { model: "小米 AI 音箱 2", image: "L15A.webp", wifi: "5G", airplay: false },
+      "X10A": { model: "Xiaomi 智能家庭屏 10", image: "X10A.webp", wifi: "5G", airplay: false },
       "OH2": { model: "Xiaomi 智能音箱", image: "OH2.webp", wifi: "5G", airplay: false },
+      "OH2P": { model: "Xiaomi 智能音箱 Pro", image: "OH2P.webp", wifi: "5G", airplay: false },
+      "OH11": { model: "Xiaomi 智能家庭屏 11", image: "OH11.webp", wifi: "5G", airplay: false },
+
       // ---- Sound 系列 (原生支持 AirPlay 2) ----
       "L16A": { model: "Xiaomi Sound", image: "L16A.webp", wifi: "5G", airplay: true },
-      "L17A": { model: "Xiaomi Sound Pro", image: "L17A.webp", wifi: "5G", airplay: true }
+      "L16B": { model: "Xiaomi Sound", image: "L16B.webp", wifi: "5G", airplay: true },
+      "L17A": { model: "Xiaomi Sound Pro", image: "L17A.webp", wifi: "5G", airplay: true },
+      "OH1P": { model: "Xiaomi Sound 2 Pro", image: "OH1P.webp", wifi: "5G", airplay: true },
+      "OH1M": { model: "Xiaomi Sound 2 Max", image: "OH1M.webp", wifi: "5G", airplay: true }
     };
 
     let currentSetting = {};
@@ -2482,7 +2488,7 @@
         const saved = savedMap.get(did) || {};
         const runtime = runtimeMap.get(did) || {};
         const deviceInfo = getDeviceInfo(saved.hardware || device.hardware || "");
-        const imagePath = `/static/devicespic/${deviceInfo.image}`;
+        const imagePath = `/static/models/${deviceInfo.image}`;
         const enabled = Boolean(saved.enabled);
         const isGroupMember = (currentGroup.member_dids || []).includes(did);
         const isChecked = currentMode === "group" ? isGroupMember : enabled;

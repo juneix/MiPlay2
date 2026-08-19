@@ -205,11 +205,13 @@ class TargetConfig:
     device_id: str = ""
     hardware: str = ""
     use_music_api: bool = False
+    default_audio_id: str = ""
 
     def __post_init__(self):
         self.id = self.id or self.did or str(uuid.uuid4())
         self.name = self.name.strip()
         self.airplay_name = self.airplay_name.strip()
+        self.default_audio_id = (self.default_audio_id or "").strip()
         self.ensure_names()
 
     def ensure_names(self):
@@ -238,8 +240,8 @@ class Config:
     host: str = ""
     web_port: int = 8820
     verbose: bool = False
-    db_range: int = 30  # AirPlay 1 分贝换算跨度 (范围: 20~50, 默认: 30)
-    virtual_delay: int = 2000  # 全屋虚拟音箱对齐延时毫秒 (范围: 0~3000ms, 默认: 2000ms)
+    virtual_delay: int = 2000  # 全屋虚拟音箱对齐延时毫秒 (范围: 0~5000ms, 默认: 2000ms)
+    default_audio_id: str = ""  # 全局触屏默认 AudioID (留空使用内置 DEFAULT_AUDIO_ID)
     xiaomi: XiaomiConfig = field(default_factory=XiaomiConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     group: GroupConfig = field(default_factory=GroupConfig)
@@ -251,12 +253,7 @@ class Config:
     def __post_init__(self):
         # 限制参数安全范围，防止用户异常配置
         try:
-            self.db_range = max(20, min(50, int(self.db_range)))
-        except (ValueError, TypeError):
-            self.db_range = 30
-
-        try:
-            self.virtual_delay = max(0, min(3000, int(self.virtual_delay)))
+            self.virtual_delay = max(0, min(5000, int(self.virtual_delay)))
         except (ValueError, TypeError):
             self.virtual_delay = 2000
 
@@ -343,9 +340,10 @@ class Config:
             flags=re.MULTILINE | re.DOTALL,
         )
         raw = json.loads(clean_text)
-        # 擦除磁盘历史文件中可能残留存盘的旧 host 坏值与无用 legacy 字段
+        # 擦除磁盘历史文件中可能残留存盘的旧 host 坏值与废弃字段
         raw.pop("host", None)
         raw.pop("legacy", None)
+        raw.pop("db_range", None)
         raw["conf_path"] = conf_path
         config = cls(**raw)
         return config

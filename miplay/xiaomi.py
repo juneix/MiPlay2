@@ -25,18 +25,39 @@ from miplay.notify import Notifier
 log = logging.getLogger("miplay")
 
 MUSIC_API_MODELS = [
-    "X08C",
-    "X08E",
-    "X8F",
-    "X4B",
-    "LX05",
-    "LX05A",
-    "OH2",
-    "OH2P",
-    "X6A",
+    # ---- 2.4G 系列 ----
+    "LX04",   # 小爱触屏音箱
+    "LX5A",   # 小爱音箱 万能遥控版 (铭牌/MIoT: LX05A)
+    "L07A",   # Redmi 小爱音箱 Play
+    "X08C",   # Redmi 小爱触屏音箱 8
+    "L05B",   # 小米小爱音箱 Play
+    "L05C",   # 小米小爱音箱 Play 增强版
+    "X6A",    # Xiaomi 智能家庭屏 6
+    "ASX4B",  # Xiaomi 智能家庭屏 Mini (部分批次: X4B / X8F)
+    "X4B",    # Xiaomi 智能家庭屏 Mini
+    # ---- 5G 系列 ----
+    "M01",    # 小米小爱音箱 HD (铭牌: XMYX01JY, MIoT: SM4)
+    "L06A",   # 小爱音箱
+    "LX06",   # 小爱音箱 Pro
+    "X08A",   # 小米小爱触屏音箱 Pro 8
+    "L09A",   # 小爱音箱 Art
+    "X08E",   # Redmi 小爱触屏音箱 Pro 8
+    "L09B",   # 小爱音箱 Art 电池版
+    "L15A",   # 小米 AI 音箱 2
+    "X10A",   # Xiaomi 智能家庭屏 10
+    "OH2",    # Xiaomi 智能音箱
+    "OH2P",   # Xiaomi 智能音箱 Pro
+    "OH11",   # Xiaomi 智能家庭屏 11
+    # ---- Sound 系列 ----
+    "L16A",   # Xiaomi Sound
+    "L16B",   # Xiaomi Sound (UWB 改款)
+    "L17A",   # Xiaomi Sound Pro
+    "OH1P",   # Xiaomi Sound 2 Pro
+    "OH1M",   # Xiaomi Sound 2 Max
 ]
 
-DEFAULT_AUDIO_ID = " "
+DEFAULT_AUDIO_ID = "1674538785546746632"  # 石进 - 《夜的钢琴曲五》 (高品质触屏封面与歌词)
+
 
 
 def parse_cookie_string(cookie_str: str) -> dict:
@@ -345,17 +366,81 @@ class TargetController:
     def _should_use_music_api(self) -> bool:
         return self.target.use_music_api or self.target.hardware in MUSIC_API_MODELS
 
-    async def play_url(self, url: str) -> bool:
+    async def search_audio_id(self, title: str, artist: str = "", fuzzy_fallback: bool = True) -> str:
+        """从小米曲库检索对应歌曲的 audioID (用于触屏音箱显示海报与歌词)。"""
+        title = (title or "").strip()
+        if not title:
+            return ""
+        artist = (artist or "").strip()
+        query_artist = artist
+        for sep in ("--", " — ", " · ", "—", "·", "-", "/"):
+            if sep in artist:
+                parts = [p.strip() for p in artist.split(sep)]
+                if len(parts) == 2 and parts[0] and parts[1]:
+                    if parts[0].lower() == title.lower():
+                        query_artist = parts[1]
+                    elif parts[1].lower() == title.lower():
+                        query_artist = parts[0]
+                break
+        query = f"{title} {query_artist}".strip() if query_artist else title
+        try:
+            await self.auth.ensure_login()
+            if not self.auth.mina_service:
+                return ""
+            result = await self.auth.mina_service.mina_request(
+                "/music/search",
+                {
+                    "query": query,
+                    "queryType": "1",
+                    "offset": "0",
+                    "count": "6",
+                },
+            )
+        except Exception as exc:
+            log.warning("Mina music search error (%s): %s", query, exc)
+            return ""
+
+        song_list = (result or {}).get("data", {}).get("songList") or []
+        if not song_list:
+            return ""
+
+        first_artist = re.split(r"[;；,，&、/·・—\-]", artist)[0].strip() if artist else ""
+        artist_l = artist.lower()
+        for song in song_list:
+            name = (song.get("name") or "").strip()
+            song_artist = (song.get("artist") or {}).get("name") or ""
+            if name.lower() != title.lower():
+                continue
+            if first_artist:
+                if first_artist.lower() not in song_artist.lower() and not (
+                    song_artist and song_artist.lower() in artist_l
+                ):
+                    continue
+            audio_id = str(song.get("audioID") or "")
+            if audio_id:
+                log.info("Mina music search exact hit (%s) audioID=%s", query, audio_id)
+                return audio_id
+
+        if fuzzy_fallback and song_list:
+            audio_id = str(song_list[0].get("audioID") or "")
+            if audio_id:
+                log.info("Mina music search fallback to top result (%s) audioID=%s", query, audio_id)
+                return audio_id
+
+        return ""
+
+    async def play_url(self, url: str, audio_id: str | None = None) -> bool:
+        effective_audio_id = (audio_id or "").strip() or DEFAULT_AUDIO_ID
         for attempt in range(2):
             try:
                 await self.auth.ensure_login()
                 if self._should_use_music_api():
                     result = await self.auth.mina_service.play_by_music_url(
-                        self.device_id, url, audio_id=DEFAULT_AUDIO_ID
+                        self.device_id, url, audio_id=effective_audio_id
                     )
                 else:
                     result = await self.auth.mina_service.play_by_url(self.device_id, url)
-                log.info("play_url target=%s device_id=%s result=%s", self.target.airplay_name, self.device_id, result)
+                log.info("play_url target=%s device_id=%s audio_id=%s result=%s", self.target.airplay_name, self.device_id, effective_audio_id, result)
                 return result is not None
             except Exception as exc:
                 if attempt == 0:
@@ -420,7 +505,11 @@ class TargetController:
             playing_info = await self.auth.mina_service.player_get_status(self.device_id)
             if playing_info.get("code") != 0:
                 raise RuntimeError(f"Mina API error: {playing_info}")
-            info = json.loads(playing_info.get("data", {}).get("info", "{}"))
+            data = playing_info.get("data", {})
+            info_str = data.get("info")
+            if not info_str:
+                raise RuntimeError(f"Mina API missing info: {playing_info}")
+            info = json.loads(info_str)
             volume = int(info.get("volume", 0))
             if volume > 0:
                 self._last_volume = volume

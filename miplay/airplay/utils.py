@@ -54,6 +54,18 @@ logging.config.dictConfig({
 })
 
 
+def get_file_logger(name, level="INFO"):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    return logger
+
+
+def get_screen_logger(name, level="INFO"):
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    return logger
+
+
 def get_free_socket(addr=None, tcp=False):
     v4 = True
     stype = socket.SOCK_STREAM if tcp else socket.SOCK_DGRAM

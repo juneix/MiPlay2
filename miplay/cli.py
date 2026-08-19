@@ -23,19 +23,59 @@ def parse_args() -> argparse.Namespace:
     serve.add_argument("--dev", action="store_true", help="Enable AirPlay 2 Pipe Bridge dev mode")
     serve.add_argument("--pipe-path", default="/tmp/shairport/audio.fifo", help="Custom FIFO pipe path for Shairport-Sync")
 
+    search = subparsers.add_parser("search", help="Search Xiaomi music library for songs and audioIDs")
+    search.add_argument("query", help="Song or artist keyword to search")
+    search.add_argument("--conf-path", default="conf", help="Configuration directory")
+
     return parser.parse_args()
+
+
+async def run_search(conf_path: str, query: str):
+    """从小米曲库搜索歌曲信息、封面与 audioID。"""
+    from miplay.xiaomi import AuthManager
+    config = Config.load(conf_path)
+    auth = AuthManager(config)
+    try:
+        await auth.ensure_login()
+        if not auth.mina_service:
+            print("[错误] 未能成功登录小米账号，请先在 conf/config.json 填入 Cookie 或执行扫码登录。")
+            return
+        res = await auth.mina_service.mina_request(
+            "/music/search",
+            {"query": query, "queryType": "1", "offset": "0", "count": "8"},
+        )
+        song_list = (res or {}).get("data", {}).get("songList") or []
+        if not song_list:
+            print(f"未找到与 '{query}' 匹配的歌曲。")
+            return
+
+        print(f"\n🎵 找到 {len(song_list)} 条小米曲库搜索结果 (关键字: '{query}'):\n")
+        print(f"{'序号':<4} {'歌名':<22} {'歌手':<15} {'AudioID (用于触屏)':<22} {'封面预览链接'}")
+        print("-" * 110)
+        for i, song in enumerate(song_list, 1):
+            name = (song.get("name") or "未知")[:20]
+            artist = ((song.get("artist") or {}).get("name") or "未知")[:14]
+            audio_id = str(song.get("audioID") or "")
+            cover = song.get("coverURL") or ""
+            print(f"[{i:<2}] {name:<22} {artist:<15} {audio_id:<22} {cover}")
+        print("\n💡 提示: 可将心仪歌曲的 AudioID 配置到系统作为触屏默认封面。\n")
+    finally:
+        await auth.close()
 
 
 def main():
     # 如果没有提供子命令，默认使用 'serve'
     if len(sys.argv) == 1:
         sys.argv.append("serve")
-    elif len(sys.argv) > 1 and sys.argv[1] not in ["serve", "-h", "--help"]:
+    elif len(sys.argv) > 1 and sys.argv[1] not in ["serve", "search", "-h", "--help"]:
         sys.argv.insert(1, "serve")
 
     args = parse_args()
     command = args.command or "serve"
-    if command != "serve":
+    if command == "search":
+        asyncio.run(run_search(args.conf_path, args.query))
+        return
+    elif command != "serve":
         raise SystemExit(f"Unsupported command: {command}")
 
     import os

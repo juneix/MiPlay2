@@ -82,39 +82,77 @@ class AirPlayBridge:
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._stop_target(), self._loop)
 
+    @staticmethod
+    def _vol_pct_to_db(volume: int) -> float:
+        if volume <= 0:
+            return -144.0
+        if volume >= 100:
+            return 0.0
+        if volume <= 6:
+            return -28.125
+        return (volume - 6) / 94.0 * 28.125 - 28.125
+
     def _on_volume_change(self, vol_db: float):
         if vol_db <= -144:
             volume = 0
         elif vol_db >= 0:
             volume = 100
         else:
-            db_range = getattr(self.config, "db_range", 30) if self.config else 30
-            volume = int((vol_db + db_range) / db_range * 100)
-            
-            if volume < 0:
-                volume = 0
-            elif volume > 100:
-                volume = 100
-            elif volume == 0 and vol_db > -db_range:
+            # 标准 Apple 16 档等分衰减映射: -28.125 dB ~ 0 dB -> 6% ~ 100%
+            volume = round(6 + (vol_db + 28.125) / 28.125 * 94)
+            volume = max(0, min(100, volume))
+            if volume == 0 and vol_db > -144:
                 volume = 1
-                
+
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self.controller.set_volume(volume), self._loop)
+
+    async def _resolve_audio_id(self) -> str | None:
+        """从当前 AirPlay 元数据中解析并检索曲库匹配的 audioID。"""
+        meta = self.airplay_server.metadata if self.airplay_server else {}
+        title = (meta.get("title") or "").strip()
+        artist = (meta.get("artist") or "").strip()
+        if not title:
+            return None
+        try:
+            audio_id = await asyncio.wait_for(
+                self.controller.search_audio_id(title, artist, fuzzy_fallback=True),
+                timeout=3.0,
+            )
+            return audio_id or None
+        except Exception as exc:
+            log.warning("Audio ID search error for %s: %s", title, exc)
+            return None
 
     async def _play_on_target(self, stream_url: str):
         self._stream_url = stream_url
         self._airplay_active = True
         self._play_grace_until = time.time() + 10.0
         log.info("--> Incoming AirPlay stream request for %s (RTSP stream: %s)", self.device_name, stream_url)
-        if await self.controller.play_url(stream_url):
+
+        # 优先检索曲库匹配真实 audioID，未命中回退用户配置或内置默认
+        custom_default = getattr(self.target, "default_audio_id", "") or (getattr(self.config, "default_audio_id", "") if self.config else "")
+        self._session_audio_id = await self._resolve_audio_id() or custom_default or None
+
+        if await self.controller.play_url(stream_url, self._session_audio_id):
             self._start_poll()
-            log.info("AirPlay stream attached to %s", self.device_name)
+            log.info("AirPlay stream attached to %s (audio_id=%s)", self.device_name, self._session_audio_id)
+            # 开播时主动读取音箱当前物理音量，反向对齐 AirPlay 控制端
+            try:
+                cur_vol = await self.controller.get_status()
+                vol = cur_vol.get("volume", 0)
+                if vol > 0 and self.airplay_server:
+                    self.airplay_server._last_volume_db = self._vol_pct_to_db(vol)
+                    log.info("Aligned AirPlay initial volume with speaker %s: %d%% (%0.2f dB)", self.device_name, vol, self.airplay_server._last_volume_db)
+            except Exception as e:
+                log.debug("Could not align initial volume for %s: %s", self.device_name, e)
         else:
             log.warning("Xiaomi target rejected AirPlay stream for %s", self.device_name)
 
     async def _stop_target(self):
         self._airplay_active = False
         self._stream_url = ""
+        self._session_audio_id = None
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -143,20 +181,29 @@ class AirPlayBridge:
                 if time.time() < self._play_grace_until:
                     continue
                 try:
-                    status = await asyncio.wait_for(self.controller.get_status(), timeout=10)
-                    if status.get("status", 0) == 1:
+                    status = await asyncio.wait_for(self.controller.get_status(), timeout=8)
+                    speaker_status = status.get("status", 0)
+                    # status: 0=stopped, 1=playing, 2=paused
+                    if speaker_status == 1:
                         continue
-                    await asyncio.sleep(5)
+
+                    # 音箱非播放状态但 AirPlay 活跃，判定为被语音/闹钟打断
+                    log.info("[%s] 检测到播放中断 (status=%s)，等待语音播报结束后自动续播...", self.device_name, speaker_status)
+                    await asyncio.sleep(4)  # 给予语音播报结束宽限时间
+
                     if not self._airplay_active or not self._stream_url:
                         break
                     if self.airplay_server and not self.airplay_server.is_playing:
                         break
+
                     base_url = self._stream_url.split("?")[0]
                     fresh_url = f"{base_url}?sid={int(time.time())}"
                     self._play_grace_until = time.time() + 10.0
-                    await self.controller.play_url(fresh_url)
-                except Exception:
-                    pass
+                    log.info("[%s] 自动自愈续播下发: %s", self.device_name, fresh_url)
+                    await self.controller.play_url(fresh_url, self._session_audio_id)
+                except Exception as exc:
+                    # 忽略网络抖动或超时错误，避免循环误下发
+                    log.debug("[%s] 状态轮询异常 (忽略): %s", self.device_name, exc)
         except asyncio.CancelledError:
             pass
 

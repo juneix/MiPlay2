@@ -159,6 +159,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         payload = {
             "client_ip": client_ip,
             "virtual_speakers": get_virtual_speakers(),
+            "default_audio_id": config.default_audio_id,
             "xiaomi": {
                 "cookie": config.xiaomi.cookie,
                 "has_credentials": bool(config.xiaomi.cookie),
@@ -176,6 +177,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                     "enabled": target.enabled,
                     "device_id": target.device_id,
                     "hardware": target.hardware,
+                    "default_audio_id": target.default_audio_id,
                 }
                 for target in config.targets
             ],
@@ -198,6 +200,10 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     async def handle_save_setting(request: web.Request):
         data = await request.json()
         need_restart = False
+
+        if "default_audio_id" in data:
+            config.default_audio_id = str(data["default_audio_id"]).strip()
+            need_restart = True
 
         if "xiaomi" in data:
             xiaomi = data["xiaomi"]

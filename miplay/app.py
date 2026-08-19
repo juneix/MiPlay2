@@ -164,7 +164,6 @@ class MiPlay:
             "running": self.running,
             "host": self.config.host,
             "web_port": self.config.web_port,
-            "db_range": self.config.db_range,
             "virtual_delay": self.config.virtual_delay,
             "targets_count": len(self.config.get_enabled_targets()),
             "bridges_count": len(self.bridge_manager.bridges) if self.bridge_manager else 0,
