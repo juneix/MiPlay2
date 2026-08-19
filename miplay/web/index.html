@@ -1736,7 +1736,9 @@
     let isAudioUnlocked = false;
     let virtualRelayAudio = null;
     let delayTimer = null;
-    let virtualDelay = 2000; // 默认 2000ms，对齐小米音箱硬件开声物理时间 (支持 conf/config.json 微调)
+    let virtualDelay = 2000; // 默认 2000ms，用于全屋 PCM 内容缓冲或远程 URL 启动等待
+    let currentVirtualAudioTarget = "group_all";
+    let currentVirtualAudioDelay = virtualDelay;
 
     // ---- 客户端设备标识 ----
     function getOrCreateDeviceId() {
@@ -1877,6 +1879,9 @@
               if (msg.client_ip) {
                 currentClientIp = msg.client_ip;
               }
+              if (typeof msg.virtual_delay === "number") {
+                virtualDelay = msg.virtual_delay;
+              }
               if (Array.isArray(msg.virtual_speakers)) {
                 virtualSpeakers = msg.virtual_speakers;
               }
@@ -1903,24 +1908,46 @@
                     clearTimeout(delayTimer);
                     delayTimer = null;
                   }
+                  const playUrl = msg.url.startsWith("/")
+                    ? (window.location.origin + msg.url + (msg.url.includes("?") ? "&" : "?") + "_t=" + Date.now())
+                    : msg.url;
+                  const parsedUrl = new URL(playUrl, window.location.origin);
+                  const isBufferedPcm = parsedUrl.origin === window.location.origin
+                    && (parsedUrl.pathname === "/stream/live.wav" || parsedUrl.pathname === "/stream/group.wav");
+                  const configuredPcmDelay = Number.parseInt(parsedUrl.searchParams.get("virtual_delay") || "0", 10);
+                  const delayMs = isBufferedPcm
+                    ? Math.max(0, Math.min(5000, Number.isFinite(configuredPcmDelay) ? configuredPcmDelay : 0))
+                    : ((target === "group_all" || target === "virtual_all") ? virtualDelay : 0);
+                  currentVirtualAudioTarget = target;
+                  currentVirtualAudioDelay = delayMs;
+                  reportVirtualAudioEvent("command_received", { target, virtual_delay: delayMs });
+                  if (virtualRelayAudio) {
+                    virtualRelayAudio.pause();
+                    virtualRelayAudio.src = "";
+                  }
                   if (isAudioMasterTab && isAudioUnlocked && virtualRelayAudio) {
-                    const playUrl = msg.url.startsWith("/")
-                      ? (window.location.origin + msg.url + (msg.url.includes("?") ? "&" : "?") + "_t=" + Date.now())
-                      : msg.url;
-                    const delayMs = (target === "group_all" || target === "virtual_all") ? virtualDelay : 0;
-                    if (delayMs > 0) {
+                    if (!isBufferedPcm && delayMs > 0) {
+                      reportVirtualAudioEvent("scheduled", { target, virtual_delay: delayMs });
                       delayTimer = setTimeout(() => {
                         if (virtualRelayAudio) {
+                          reportVirtualAudioEvent("play_call", { target, virtual_delay: delayMs });
                           virtualRelayAudio.src = playUrl;
-                          virtualRelayAudio.play().catch((e) => console.log("Play error:", e));
+                          virtualRelayAudio.play().catch((e) => {
+                            reportVirtualAudioEvent("play_error", { target, virtual_delay: delayMs, error: String(e) });
+                          });
                         }
+                        delayTimer = null;
                       }, delayMs);
                     } else {
+                      reportVirtualAudioEvent("play_call", { target, virtual_delay: delayMs });
                       virtualRelayAudio.src = playUrl;
-                      virtualRelayAudio.play().catch((e) => console.log("Play error:", e));
+                      virtualRelayAudio.play().catch((e) => {
+                        reportVirtualAudioEvent("play_error", { target, virtual_delay: delayMs, error: String(e) });
+                      });
                     }
                   }
                 } else if (action === "stop" || action === "pause") {
+                  reportVirtualAudioEvent("command_received", { target, virtual_delay: currentVirtualAudioDelay });
                   if (delayTimer) {
                     clearTimeout(delayTimer);
                     delayTimer = null;
@@ -1929,6 +1956,7 @@
                     virtualRelayAudio.pause();
                     virtualRelayAudio.src = "";
                   }
+                  reportVirtualAudioEvent("stopped", { target, virtual_delay: currentVirtualAudioDelay });
                 }
               }
             } else if (msg.type === "status_update") {
@@ -1950,6 +1978,21 @@
       } catch (e) {
         wsReconnectTimer = setTimeout(connectWebSocket, 5000);
       }
+    }
+
+    function reportVirtualAudioEvent(event, details = {}) {
+      if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
+      const payload = {
+        type: "virtual_audio_event",
+        event,
+        client_ts: Date.now(),
+        target: details.target || currentVirtualAudioTarget,
+        virtual_delay: typeof details.virtual_delay === "number" ? details.virtual_delay : currentVirtualAudioDelay
+      };
+      if (details.error) payload.error = String(details.error).slice(0, 300);
+      try {
+        wsClient.send(JSON.stringify(payload));
+      } catch (e) {}
     }
 
     // 10 秒应用层定时心跳包，防路由器/防火墙空闲掐断
@@ -1986,14 +2029,17 @@
             virtualRelayAudio.setAttribute("playsinline", "true");
             virtualRelayAudio.setAttribute("webkit-playsinline", "true");
             virtualRelayAudio.onplay = () => {
+              reportVirtualAudioEvent("playing");
               acquireWakeLock();
               updateMediaSession(true);
             };
             virtualRelayAudio.onpause = () => {
+              reportVirtualAudioEvent("paused");
               releaseWakeLock();
               updateMediaSession(false);
             };
             virtualRelayAudio.onended = () => {
+              reportVirtualAudioEvent("ended");
               releaseWakeLock();
               updateMediaSession(false);
             };
@@ -2616,28 +2662,6 @@
         if (ip && !seenIps.has(ip)) {
           seenIps.add(ip);
           activeSpeakers.push(sp);
-        }
-      }
-
-      // <!-- Section: Group Virtual Speaker Sync Playback (联动全屋模式并对齐米家延迟) -->
-      if (currentMode === "group" && groupPlaying && isAudioUnlocked && isAudioMasterTab && virtualRelayAudio) {
-        if (virtualRelayAudio.paused && !delayTimer) {
-          delayTimer = setTimeout(() => {
-            if (virtualRelayAudio && groupPlaying) {
-              virtualRelayAudio.src = "/stream/live.wav?t=" + Date.now();
-              virtualRelayAudio.play().catch(() => {});
-            }
-            delayTimer = null;
-          }, virtualDelay);
-        }
-      } else if ((!groupPlaying || !isAudioMasterTab) && virtualRelayAudio && (virtualRelayAudio.src || "").includes("/stream/live.wav")) {
-        if (delayTimer) {
-          clearTimeout(delayTimer);
-          delayTimer = null;
-        }
-        if (!virtualRelayAudio.paused) {
-          virtualRelayAudio.pause();
-          virtualRelayAudio.src = "";
         }
       }
 

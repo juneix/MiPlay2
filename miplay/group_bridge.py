@@ -207,21 +207,20 @@ class GroupBridge:
         self._stream_url = stream_url
         self._airplay_active = True
         self._play_grace_until = time.time() + 10.0
-        try:
-            from miplay.web.api import broadcast_ws
-            asyncio.create_task(broadcast_ws({
-                "type": "control_command",
-                "action": "play_url",
-                "target": "group_all",
-                "url": stream_url,
-            }))
-        except Exception:
-            pass
-
         custom_default = getattr(self.config, "default_audio_id", "") if self.config else ""
         self._session_audio_id = await self._resolve_audio_id() or custom_default or None
 
         if await self.controller.play_url(stream_url, self._session_audio_id):
+            try:
+                from miplay.web.api import broadcast_ws
+                asyncio.create_task(broadcast_ws({
+                    "type": "control_command",
+                    "action": "play_url",
+                    "target": "group_all",
+                    "url": f"/stream/live.wav?virtual_delay={self.config.virtual_delay}",
+                }))
+            except Exception:
+                pass
             self._start_poll()
             log.info("Group AirPlay stream attached to speakers (%s)", self.device_name)
         else:

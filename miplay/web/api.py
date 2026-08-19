@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import logging
 from datetime import datetime
@@ -31,6 +32,42 @@ qr_manager = QRLoginManager()
 
 # 全局在线 Web 虚拟音箱会话管理 (按 device_id 唯一去重)
 _ws_sessions: dict[str, dict] = {}
+
+_PCM_FRAME_BYTES = 4
+_PCM_BYTE_RATE = 44100 * 2 * 2
+
+
+class _PcmDelayBuffer:
+    """Retain a fixed PCM window and emit only audio older than that window."""
+
+    def __init__(self, virtual_delay: int):
+        target_bytes = _PCM_BYTE_RATE * virtual_delay // 1000
+        self.target_bytes = target_bytes - (target_bytes % _PCM_FRAME_BYTES)
+        self.buffered_bytes = 0
+        self._chunks: deque[bytes] = deque()
+
+    def push(self, data: bytes) -> bytes:
+        if data:
+            self._chunks.append(data)
+            self.buffered_bytes += len(data)
+
+        emit_bytes = self.buffered_bytes - self.target_bytes
+        emit_bytes -= emit_bytes % _PCM_FRAME_BYTES
+        if emit_bytes <= 0:
+            return b""
+
+        output = bytearray()
+        while emit_bytes > 0:
+            chunk = self._chunks[0]
+            take = min(emit_bytes, len(chunk))
+            output.extend(chunk[:take])
+            if take == len(chunk):
+                self._chunks.popleft()
+            else:
+                self._chunks[0] = chunk[take:]
+            self.buffered_bytes -= take
+            emit_bytes -= take
+        return bytes(output)
 
 
 def _restart_process():
@@ -77,14 +114,20 @@ def get_virtual_speakers() -> list[dict]:
 
 async def broadcast_ws(message: dict):
     """向所有连接的 Web 客户端广播实时消息。"""
-    if not _ws_sessions:
-        return
     data = json.dumps(message)
     coros = []
     for s in list(_ws_sessions.values()):
         ws: web.WebSocketResponse = s.get("ws")
         if ws and not ws.closed:
             coros.append(ws.send_str(data))
+    if message.get("type") == "control_command":
+        log.info(
+            "[Audio] WebSocket 广播控制指令: action=%s target=%s clients=%d server_ts=%d",
+            message.get("action", ""),
+            message.get("target", ""),
+            len(coros),
+            int(time.time() * 1000),
+        )
     if coros:
         await asyncio.gather(*coros, return_exceptions=True)
 
@@ -109,13 +152,14 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             "connected_at": time.time(),
             "ws": ws,
         }
-        log.info("[WebSocket] Web 虚拟音箱已连接: %s (%s - %s), 当前在线: %d", device_name, client_ip, device_id, len(_ws_sessions))
+        log.info("[System] Web 虚拟音箱已连接: name=%s ip=%s device=%s online=%d", device_name, client_ip, device_id, len(_ws_sessions))
 
         # 即刻向当前连接客户端单播自身 IP 与在线列表 (零等待即时绑定真实 IP)
         await ws.send_json({
             "type": "session_init",
             "client_ip": client_ip,
             "virtual_speakers": get_virtual_speakers(),
+            "virtual_delay": config.virtual_delay,
         })
 
         # 广播最新虚拟音箱在线状态
@@ -131,13 +175,44 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                         payload = json.loads(msg.data)
                         if payload.get("type") == "ping":
                             await ws.send_json({"type": "pong"})
+                        elif payload.get("type") == "virtual_audio_event":
+                            event = str(payload.get("event") or "")
+                            allowed_events = {
+                                "command_received",
+                                "scheduled",
+                                "play_call",
+                                "playing",
+                                "paused",
+                                "ended",
+                                "play_error",
+                                "stopped",
+                            }
+                            if event in allowed_events:
+                                fields = [
+                                    f"device={device_id}",
+                                    f"ip={client_ip}",
+                                    f"event={event}",
+                                ]
+                                target = payload.get("target")
+                                if target:
+                                    fields.append(f"target={target}")
+                                client_ts = payload.get("client_ts")
+                                if client_ts is not None:
+                                    fields.append(f"client_ts={client_ts}")
+                                virtual_delay = payload.get("virtual_delay")
+                                if virtual_delay is not None:
+                                    fields.append(f"virtual_delay={virtual_delay}")
+                                error = str(payload.get("error") or "")[:300]
+                                if event == "play_error" and error:
+                                    fields.append(f"error={error}")
+                                log.info("[Audio] Web 虚拟音箱 %s", " ".join(fields))
                     except Exception:
                         pass
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     break
         finally:
             _ws_sessions.pop(device_id, None)
-            log.info("[WebSocket] Web 虚拟音箱已断开: %s (%s), 剩余在线: %d", device_name, client_ip, len(_ws_sessions))
+            log.info("[System] Web 虚拟音箱已断开: name=%s ip=%s device=%s online=%d", device_name, client_ip, device_id, len(_ws_sessions))
             await broadcast_ws({
                 "type": "presence_update",
                 "virtual_speakers": get_virtual_speakers(),
@@ -342,6 +417,11 @@ def create_web_app(config: Config, app_instance) -> web.Application:
 
     async def handle_stream_live_wav(request: web.Request) -> web.StreamResponse:
         """Egress 实时音频广播流 (支持手机浏览器、自研 APK、VLC 等即开即听)。"""
+        try:
+            virtual_delay = max(0, min(5000, int(request.query.get("virtual_delay", "0"))))
+        except (TypeError, ValueError):
+            virtual_delay = 0
+        client_ip = request.remote or "127.0.0.1"
         response = web.StreamResponse(
             status=200,
             headers={
@@ -357,6 +437,14 @@ def create_web_app(config: Config, app_instance) -> web.Application:
 
         # 注册成为 Egress 监听队列
         queue_listener = app_instance.audio_hub.create_listener_queue()
+        delay_buffer = _PcmDelayBuffer(virtual_delay) if virtual_delay else None
+        buffer_ready = virtual_delay == 0
+        if "virtual_delay" in request.query:
+            log.info(
+                "[Audio] Web 虚拟音箱流已连接: ip=%s virtual_delay=%d",
+                client_ip,
+                virtual_delay,
+            )
         try:
             # 写入标准 WAV 头部 (44.1k/16bit/2ch)
             await response.write(app_instance.audio_hub.build_wav_header())
@@ -367,7 +455,20 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                 chunk = await loop.run_in_executor(None, queue_listener.get)
                 if chunk is None:
                     break
-                await response.write(chunk)
+                if delay_buffer is None:
+                    await response.write(chunk)
+                    continue
+                output = delay_buffer.push(chunk)
+                if not buffer_ready and delay_buffer.buffered_bytes >= delay_buffer.target_bytes:
+                    buffer_ready = True
+                    log.info(
+                        "[Audio] Web 虚拟音箱缓冲就绪: ip=%s virtual_delay=%d buffered_bytes=%d",
+                        client_ip,
+                        virtual_delay,
+                        delay_buffer.buffered_bytes,
+                    )
+                if output:
+                    await response.write(output)
         except Exception:
             pass
         finally:
@@ -389,16 +490,24 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         if stream_server:
             stream_server.start_streaming()
 
-        # 下发播放指令给目标真实音箱与 Web 虚拟音箱
+        if not target.startswith("virtual_") or target in ("group_all", "group", "all"):
+            ok = await app_instance.play_url_to_targets(target, stream_url)
+            if not ok:
+                app_instance.audio_hub.stop_source("api_ingest")
+                if stream_server:
+                    stream_server.stop_streaming()
+                return web.json_response(
+                    {"ok": False, "message": "小米音箱播放指令下发失败"},
+                    status=502,
+                )
+
         await broadcast_ws({
             "type": "control_command",
             "action": "play_url",
             "target": target,
-            "url": stream_url,
+            "url": f"/stream/live.wav?virtual_delay={config.virtual_delay}",
         })
-        if not target.startswith("virtual_") or target in ("group_all", "group", "all"):
-            await app_instance.play_url_to_targets(target, stream_url)
-        log.info("[AudioHub] 外部 API 推流已连接，下发播放目标: %s", target)
+        log.info("[Audio] 外部 API 推流已连接，下发播放目标: %s", target)
 
         try:
             async for chunk, _ in request.content.iter_chunks():
@@ -408,7 +517,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                     app_instance.audio_hub.broadcast_pcm(chunk)
             return web.json_response({"ok": True, "message": "推流完成"})
         except Exception as exc:
-            log.warning("[AudioHub] 外部 API 推流中断: %s", exc)
+            log.warning("[Audio] 外部 API 推流中断: %s", exc)
             return web.json_response({"ok": False, "message": str(exc)}, status=500)
         finally:
             app_instance.audio_hub.stop_source("api_ingest")
@@ -421,7 +530,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             })
             if not target.startswith("virtual_") or target in ("group_all", "group", "all"):
                 await app_instance.stop_targets(target)
-            log.info("[AudioHub] 外部 API 推流已结束并通知音箱停止: %s", target)
+            log.info("[Audio] 外部 API 推流已结束并通知音箱停止: %s", target)
 
     async def handle_control_play(request: web.Request) -> web.Response:
         """通用音频播放与控制指令 RPC 接口 (兼容 /api/control 与 /api/v1/control/play)。"""
@@ -443,23 +552,36 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                     status=404,
                 )
 
-        # 广播 WebSocket 控制指令到在线 Web 虚拟音箱
-        await broadcast_ws({
-            "type": "control_command",
-            "action": action,
-            "target": target,
-            "url": url,
-            "volume": volume,
-        })
-
         if action == "play_url":
             if not url:
                 return web.json_response({"ok": False, "message": "Missing url"}, status=400)
             if target.startswith("virtual_") and target not in ("group_all", "group", "all"):
+                await broadcast_ws({
+                    "type": "control_command",
+                    "action": action,
+                    "target": target,
+                    "url": url,
+                    "volume": volume,
+                })
                 return web.json_response({"ok": True, "target": target})
             ok = await app_instance.play_url_to_targets(target, url)
+            if ok:
+                await broadcast_ws({
+                    "type": "control_command",
+                    "action": action,
+                    "target": target,
+                    "url": url,
+                    "volume": volume,
+                })
             return web.json_response({"ok": ok})
         elif action in ("stop", "pause"):
+            await broadcast_ws({
+                "type": "control_command",
+                "action": action,
+                "target": target,
+                "url": url,
+                "volume": volume,
+            })
             if target.startswith("virtual_") and target not in ("group_all", "group", "all"):
                 return web.json_response({"ok": True, "target": target})
             ok = await app_instance.stop_targets(target)
@@ -467,6 +589,13 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         elif action == "set_volume":
             if volume is None:
                 return web.json_response({"ok": False, "message": "Missing volume"}, status=400)
+            await broadcast_ws({
+                "type": "control_command",
+                "action": action,
+                "target": target,
+                "url": url,
+                "volume": volume,
+            })
             if target.startswith("virtual_") and target not in ("group_all", "group", "all"):
                 return web.json_response({"ok": True, "target": target})
             ok = await app_instance.set_volume_to_targets(target, int(volume))
@@ -559,4 +688,3 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     if os.path.exists(static_dir):
         web_app.router.add_static("/static", static_dir)
     return web_app
-

@@ -60,7 +60,7 @@ class AudioHub:
         q: queue.Queue[bytes | None] = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         with self._client_lock:
             self._client_queues.append(q)
-            log.info("[AudioHub] 新增 Egress 监听客户端 (当前活跃听众: %d)", len(self._client_queues))
+            log.info("[Audio] 新增 Egress 监听客户端 (当前活跃听众: %d)", len(self._client_queues))
         return q
 
     def remove_listener_queue(self, q: queue.Queue[bytes | None]):
@@ -68,7 +68,7 @@ class AudioHub:
         with self._client_lock:
             if q in self._client_queues:
                 self._client_queues.remove(q)
-                log.info("[AudioHub] 移除 Egress 监听客户端 (剩余活跃听众: %d)", len(self._client_queues))
+                log.info("[Audio] 移除 Egress 监听客户端 (剩余活跃听众: %d)", len(self._client_queues))
 
     def broadcast_pcm(self, data: bytes):
         """向所有注册的 Egress 客户端分发 PCM 音频块。"""
@@ -98,7 +98,7 @@ class AudioHub:
                 return True
             elif source == "api_ingest":
                 if self.active_source == "airplay":
-                    log.warning("[AudioHub] AirPlay 正在播放中，拒绝 API 推流请求")
+                    log.warning("[Audio] AirPlay 正在播放中，拒绝 API 推流请求")
                     return False
                 self.active_source = "api_ingest"
                 self._is_streaming = True
@@ -115,11 +115,13 @@ class AudioHub:
                 # 通知所有监听器当前音频流已结束
                 with self._client_lock:
                     for q in list(self._client_queues):
-                        try:
-                            q.put_nowait(None)
-                        except queue.Full:
-                            pass
-                log.info("[AudioHub] 音频输入源已释放: %s", source)
+                        while True:
+                            try:
+                                q.get_nowait()
+                            except queue.Empty:
+                                break
+                        q.put_nowait(None)
+                log.info("[Audio] 音频输入源已释放: %s", source)
 
     def build_wav_header(self, data_size: int = 0x7FFFFF00) -> bytes:
         """生成标准 PCM WAV 头部。"""
