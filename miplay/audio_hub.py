@@ -17,7 +17,8 @@ import queue
 import struct
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+import copy
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from miplay.app import MiPlay
@@ -44,8 +45,20 @@ class AudioHub:
         
         # 活跃会话标识
         self._session_id = int(time.time())
+        self._session_counter = time.monotonic_ns()
         self._is_streaming = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._session: dict[str, Any] = {
+            "session_id": self._session_id,
+            "state": "idle",
+            "source": "",
+            "target": "group_all",
+            "metadata": {},
+            "progress": None,
+            "capabilities": {"previous": False, "play_pause": False, "next": False, "seek": False},
+        }
+        self._dropped_bytes = 0
+        self._control_handler: Callable[[str, int | None], Awaitable[bool] | bool] | None = None
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -80,13 +93,120 @@ class AudioHub:
                     q.put_nowait(data)
                 except queue.Full:
                     try:
-                        q.get_nowait()
+                        dropped = q.get_nowait()
+                        if isinstance(dropped, bytes):
+                            self._dropped_bytes += len(dropped)
                     except queue.Empty:
                         pass
                     try:
                         q.put_nowait(data)
                     except queue.Full:
                         pass
+
+    def _next_session_id(self) -> int:
+        self._session_counter += 1
+        return self._session_counter
+
+    def _publish_session(self):
+        if not self._loop or not self._loop.is_running():
+            return
+        snapshot = self.get_session()
+
+        async def publish():
+            try:
+                from miplay.web.api import broadcast_ws
+                await broadcast_ws({"type": "playback_state", "session": snapshot})
+                await broadcast_ws({"type": "now_playing", "session": snapshot})
+            except Exception:
+                log.debug("[Audio] 无法广播播放会话状态", exc_info=True)
+
+        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(publish()))
+
+    def begin_session(
+        self,
+        source: str,
+        target: str = "group_all",
+        metadata: dict | None = None,
+        stream_url: str = "",
+        capabilities: dict | None = None,
+    ) -> int:
+        with self._source_lock:
+            session_id = self._next_session_id()
+            self._session_id = session_id
+            self._session = {
+                "session_id": session_id,
+                "state": "playing",
+                "source": source,
+                "target": target,
+                "metadata": copy.deepcopy(metadata or {}),
+                "stream_url": stream_url,
+                "progress": None,
+                "capabilities": self._normalize_capabilities(capabilities),
+            }
+        self._publish_session()
+        return session_id
+
+    @staticmethod
+    def _normalize_capabilities(capabilities: dict | None) -> dict[str, bool]:
+        return {key: bool((capabilities or {}).get(key, False)) for key in ("previous", "play_pause", "next", "seek")}
+
+    def update_session_metadata(self, metadata: dict | None = None, *, state: str | None = None):
+        with self._source_lock:
+            if metadata:
+                self._session["metadata"].update({k: v for k, v in metadata.items() if v is not None})
+            if state:
+                self._session["state"] = state
+        self._publish_session()
+
+    def update_session_progress(self, position_ms: int | float | None, duration_ms: int | float | None = None):
+        with self._source_lock:
+            if position_ms is None or float(position_ms) < 0:
+                self._session["progress"] = None
+            else:
+                current = self._session.get("progress") or {}
+                duration = duration_ms if duration_ms is not None else current.get("duration_ms")
+                self._session["progress"] = {
+                    "position_ms": max(0, int(position_ms)),
+                    "duration_ms": max(0, int(duration)) if duration is not None else None,
+                    "updated_at_ms": int(time.time() * 1000),
+                }
+        self._publish_session()
+
+    def update_session_capabilities(self, capabilities: dict | None):
+        with self._source_lock:
+            self._session["capabilities"] = self._normalize_capabilities(capabilities)
+        self._publish_session()
+
+    def set_session_control_handler(self, handler: Callable[[str, int | None], Awaitable[bool] | bool] | None):
+        self._control_handler = handler
+
+    async def control_session(self, session_id: int, action: str, position_ms: int | None = None) -> tuple[bool, str]:
+        with self._source_lock:
+            if int(session_id) != int(self._session.get("session_id", 0)):
+                return False, "stale_session"
+            capability = "play_pause" if action in ("play", "pause") else action
+            if capability not in ("previous", "play_pause", "next", "seek"):
+                return False, "invalid_action"
+            if not self._session.get("capabilities", {}).get(capability, False):
+                return False, "unsupported"
+            handler = self._control_handler
+        if not handler:
+            return False, "no_handler"
+        result = handler(action, position_ms)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return (True, "") if result else (False, "failed")
+
+    def end_session(self, source: str | None = None):
+        with self._source_lock:
+            if source and self._session.get("source") not in (source, ""):
+                return
+            self._session["state"] = "stopped"
+        self._publish_session()
+
+    def get_session(self) -> dict:
+        with self._source_lock:
+            return copy.deepcopy(self._session)
 
     def start_source(self, source: str) -> bool:
         """激活输入源 (AirPlay 优先于 api_ingest)。"""
@@ -97,8 +217,8 @@ class AudioHub:
                 self._session_id = int(time.time())
                 return True
             elif source == "api_ingest":
-                if self.active_source == "airplay":
-                    log.warning("[Audio] AirPlay 正在播放中，拒绝 API 推流请求")
+                if self.active_source != "idle":
+                    log.warning("[Audio] 当前音频通道繁忙，拒绝 API 推流请求")
                     return False
                 self.active_source = "api_ingest"
                 self._is_streaming = True
@@ -108,10 +228,12 @@ class AudioHub:
 
     def stop_source(self, source: str):
         """释放输入源。"""
+        stopped = False
         with self._source_lock:
             if self.active_source == source:
                 self.active_source = "idle"
                 self._is_streaming = False
+                stopped = True
                 # 通知所有监听器当前音频流已结束
                 with self._client_lock:
                     for q in list(self._client_queues):
@@ -120,8 +242,13 @@ class AudioHub:
                                 q.get_nowait()
                             except queue.Empty:
                                 break
-                        q.put_nowait(None)
+                        try:
+                            q.put_nowait(None)
+                        except queue.Full:
+                            pass
                 log.info("[Audio] 音频输入源已释放: %s", source)
+        if stopped:
+            self.end_session(source)
 
     def build_wav_header(self, data_size: int = 0x7FFFFF00) -> bytes:
         """生成标准 PCM WAV 头部。"""
@@ -152,4 +279,6 @@ class AudioHub:
             "sample_rate": self._sample_rate,
             "channels": self._channels,
             "bitrate": f"{self._sample_rate}Hz/{self._sample_width * 8}bit/{self._channels}ch",
+            "dropped_bytes": self._dropped_bytes,
+            "session": self.get_session(),
         }

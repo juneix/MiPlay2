@@ -294,7 +294,13 @@ class BridgeManager:
             else:
                 # 普通模式 (AirPlay 1)：正常启动 GroupBridge 在 53542 端口广播
                 from miplay.group_bridge import GroupBridge
-                self.group_bridge = GroupBridge(self.host, group_controller, self._shared_zeroconf, self.config)
+                self.group_bridge = GroupBridge(
+                    self.host,
+                    group_controller,
+                    self._shared_zeroconf,
+                    self.config,
+                    self.audio_hub,
+                )
                 await self.group_bridge.start()
                 if self.audio_hub and self.group_bridge.airplay_server and self.group_bridge.airplay_server.audio_stream:
                     self.group_bridge.airplay_server.audio_stream.on_pcm_chunk = self.audio_hub.broadcast_pcm

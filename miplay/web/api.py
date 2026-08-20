@@ -16,6 +16,7 @@ import json
 import logging
 from datetime import datetime
 import os
+import queue
 import sys
 import time
 import uuid
@@ -106,7 +107,7 @@ def get_virtual_speakers() -> list[dict]:
             ip_map[ip] = {
                 "id": s["id"],
                 "ip": ip,
-                "name": s["name"],
+                "name": ip,
                 "connected_at": s["connected_at"],
             }
     return list(ip_map.values())
@@ -138,12 +139,14 @@ def create_web_app(config: Config, app_instance) -> web.Application:
 
     async def handle_ws(request: web.Request) -> web.WebSocketResponse:
         """原生 WebSocket 路由：管理 Web 虚拟音箱在线生命周期与断连即刻注销。"""
+        if request.query.get("role") != "pod":
+            raise web.HTTPForbidden(text="Only /pod may register as a virtual speaker")
         ws = web.WebSocketResponse(heartbeat=15.0)
         await ws.prepare(request)
 
         device_id = request.query.get("device_id") or request.query.get("id") or str(uuid.uuid4())
         client_ip = request.remote or "127.0.0.1"
-        device_name = request.query.get("name") or client_ip
+        device_name = client_ip
 
         _ws_sessions[device_id] = {
             "id": device_id,
@@ -160,6 +163,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             "client_ip": client_ip,
             "virtual_speakers": get_virtual_speakers(),
             "virtual_delay": config.virtual_delay,
+            "session": app_instance.audio_hub.get_session(),
         })
 
         # 广播最新虚拟音箱在线状态
@@ -186,6 +190,10 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                                 "ended",
                                 "play_error",
                                 "stopped",
+                                "stream_connected",
+                                "buffer_ready",
+                                "reconnecting",
+                                "disconnected",
                             }
                             if event in allowed_events:
                                 fields = [
@@ -205,6 +213,9 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                                 error = str(payload.get("error") or "")[:300]
                                 if event == "play_error" and error:
                                     fields.append(f"error={error}")
+                                session_id = payload.get("session_id")
+                                if session_id is not None:
+                                    fields.append(f"session_id={session_id}")
                                 log.info("[Audio] Web 虚拟音箱 %s", " ".join(fields))
                     except Exception:
                         pass
@@ -227,6 +238,10 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     async def handle_test_page(request: web.Request):
         test_path = os.path.join(os.path.dirname(__file__), "test.html")
         return web.FileResponse(test_path)
+
+    async def handle_pod_page(request: web.Request):
+        pod_path = os.path.join(os.path.dirname(__file__), "pod.html")
+        return web.FileResponse(pod_path)
 
     async def handle_get_setting(request: web.Request):
         need_device_list = request.query.get("need_device_list", "false") == "true"
@@ -413,6 +428,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         res = app_instance.get_status_snapshot()
         res["client_ip"] = request.remote or "127.0.0.1"
         res["virtual_speakers"] = get_virtual_speakers()
+        res["session"] = app_instance.audio_hub.get_session()
         return web.json_response(res)
 
     async def handle_stream_live_wav(request: web.Request) -> web.StreamResponse:
@@ -448,11 +464,15 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         try:
             # 写入标准 WAV 头部 (44.1k/16bit/2ch)
             await response.write(app_instance.audio_hub.build_wav_header())
+            log.info("[Audio] Web 虚拟音箱流连接成功: ip=%s session_id=%s", client_ip, request.query.get("session_id", ""))
 
             loop = asyncio.get_running_loop()
             while True:
                 # 非阻塞等待队列中的 PCM 音频数据
-                chunk = await loop.run_in_executor(None, queue_listener.get)
+                try:
+                    chunk = await loop.run_in_executor(None, queue_listener.get, True, 0.5)
+                except queue.Empty:
+                    continue
                 if chunk is None:
                     break
                 if delay_buffer is None:
@@ -469,8 +489,10 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                     )
                 if output:
                     await response.write(output)
-        except Exception:
-            pass
+        except (ConnectionResetError, asyncio.CancelledError):
+            log.info("[Audio] Web 虚拟音箱流断开: ip=%s session_id=%s", client_ip, request.query.get("session_id", ""))
+        except Exception as exc:
+            log.debug("[Audio] Web 虚拟音箱流异常: ip=%s error=%s", client_ip, exc)
         finally:
             app_instance.audio_hub.remove_listener_queue(queue_listener)
         return response
@@ -506,6 +528,11 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             "action": "play_url",
             "target": target,
             "url": f"/stream/live.wav?virtual_delay={config.virtual_delay}",
+            "session_id": app_instance.audio_hub.begin_session(
+                "api_ingest",
+                target,
+                stream_url=f"/stream/live.wav?virtual_delay={config.virtual_delay}",
+            ),
         })
         log.info("[Audio] 外部 API 推流已连接，下发播放目标: %s", target)
 
@@ -514,7 +541,8 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                 if chunk:
                     if stream_server:
                         stream_server.write_pcm(chunk)
-                    app_instance.audio_hub.broadcast_pcm(chunk)
+                    if not stream_server or not stream_server.on_pcm_chunk:
+                        app_instance.audio_hub.broadcast_pcm(chunk)
             return web.json_response({"ok": True, "message": "推流完成"})
         except Exception as exc:
             log.warning("[Audio] 外部 API 推流中断: %s", exc)
@@ -539,6 +567,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         target = data.get("target") or data.get("id") or "group_all"
         url = data.get("url", "")
         volume = data.get("volume")
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
 
         log.info("[Audio] 控制指令: action=%s target=%s url=%s (客户端: %s)", action, target, url, request.remote or "127.0.0.1")
 
@@ -566,25 +595,34 @@ def create_web_app(config: Config, app_instance) -> web.Application:
                 return web.json_response({"ok": True, "target": target})
             ok = await app_instance.play_url_to_targets(target, url)
             if ok:
+                session_id = app_instance.audio_hub.begin_session(
+                    "control", target, metadata, url
+                ) if target in ("group_all", "group", "all") else app_instance.audio_hub.get_session().get("session_id", 0)
                 await broadcast_ws({
                     "type": "control_command",
                     "action": action,
                     "target": target,
                     "url": url,
                     "volume": volume,
+                    "session_id": session_id,
+                    "metadata": metadata or {},
                 })
             return web.json_response({"ok": ok})
         elif action in ("stop", "pause"):
+            session_id = app_instance.audio_hub.get_session().get("session_id", 0)
             await broadcast_ws({
                 "type": "control_command",
                 "action": action,
                 "target": target,
                 "url": url,
                 "volume": volume,
+                "session_id": session_id,
             })
             if target.startswith("virtual_") and target not in ("group_all", "group", "all"):
                 return web.json_response({"ok": True, "target": target})
             ok = await app_instance.stop_targets(target)
+            if target in ("group_all", "group", "all"):
+                app_instance.audio_hub.end_session()
             return web.json_response({"ok": ok})
         elif action == "set_volume":
             if volume is None:
@@ -606,6 +644,27 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     async def handle_hub_status(request: web.Request) -> web.Response:
         """获取 Audio Hub 运行状态与监听者统计。"""
         return web.json_response(app_instance.audio_hub.get_status())
+
+    async def handle_session_control(request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+            session_id = int(data.get("session_id"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return web.json_response({"ok": False, "message": "Invalid session_id"}, status=400)
+
+        action = str(data.get("action") or "")
+        position_ms = data.get("position_ms")
+        if action == "seek":
+            try:
+                position_ms = max(0, int(position_ms))
+            except (TypeError, ValueError):
+                return web.json_response({"ok": False, "message": "Invalid position_ms"}, status=400)
+
+        ok, reason = await app_instance.audio_hub.control_session(session_id, action, position_ms)
+        if ok:
+            return web.json_response({"ok": True})
+        status = 400 if reason == "invalid_action" else 409
+        return web.json_response({"ok": False, "message": reason}, status=status)
 
     async def handle_proxy(request: web.Request) -> web.StreamResponse:
         """通用音频流 / 封面图透明反向代理 (解除浏览器 CORS 与防盗链限制)。"""
@@ -660,6 +719,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
             return web.Response(status=502, text=f"Proxy error: {exc}", headers={"Access-Control-Allow-Origin": "*"})
 
     web_app.router.add_get("/", handle_index)
+    web_app.router.add_get("/pod", handle_pod_page)
     web_app.router.add_get("/test", handle_test_page)
     web_app.router.add_get("/api/setting", handle_get_setting)
     web_app.router.add_post("/api/setting", handle_save_setting)
@@ -682,6 +742,7 @@ def create_web_app(config: Config, app_instance) -> web.Application:
     web_app.router.add_post("/api/v1/audio/stream", handle_audio_stream_ingest)
     web_app.router.add_post("/api/v1/control/play", handle_control_play)
     web_app.router.add_get("/api/v1/hub/status", handle_hub_status)
+    web_app.router.add_post("/api/v1/session/control", handle_session_control)
     web_app.router.add_get("/api/v1/proxy", handle_proxy)
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")

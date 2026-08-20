@@ -170,6 +170,7 @@ class MiPlay:
             "status_message": self.status_message,
             "warnings": self.warnings,
             "hub": self.audio_hub.get_status() if self.audio_hub else {},
+            "session": self.audio_hub.get_session() if self.audio_hub else {},
         }
 
     async def play_url_to_targets(self, target: str, url: str) -> bool:

@@ -24,7 +24,7 @@ build-backend = "setuptools.build_meta"
 include = ["miplay*"]
 
 [tool.setuptools.package-data]
-"miplay.web" = ["index.html", "static/**/*"]
+"miplay.web" = ["index.html", "pod.html", "static/**/*"]
 
 [tool.uv]
 package = true

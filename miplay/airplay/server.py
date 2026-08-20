@@ -150,7 +150,10 @@ class AirPlayServer:
         # 回调
         self.on_play_start: Callable | None = None
         self.on_play_stop: Callable | None = None
+        self.on_play_pause: Callable | None = None
         self.on_volume_change: Callable[[float], None] | None = None
+        self.on_metadata_change: Callable[[dict, str | None], None] | None = None
+        self.on_progress_change: Callable[[int, int | None], None] | None = None
 
         # FairPlay
         self._playfair = PlayFair()
@@ -161,6 +164,8 @@ class AirPlayServer:
         self._is_playing: bool = False # 是否正在播放
         self._metadata: dict = {}  # 歌曲元数据
         self._artwork: str | None = None  # 歌曲封面 (Base64)
+        self._duration_ms: int | None = None
+        self._progress_position_ms: int | None = None
         self._loop: asyncio.AbstractEventLoop | None = None  # 事件循环引用（用于跨线程回调）
 
     def _generate_device_id(self) -> str:
@@ -210,6 +215,33 @@ class AirPlayServer:
     def artwork(self) -> str | None:
         """获取当前歌曲封面 (Base64)"""
         return self._artwork
+
+    @property
+    def progress(self) -> tuple[int | None, int | None]:
+        return self._progress_position_ms, self._duration_ms
+
+    def _notify_metadata_change(self):
+        if self.on_metadata_change:
+            try:
+                self.on_metadata_change(dict(self._metadata), self._artwork)
+            except Exception:
+                log.debug("[AirPlay] 元数据回调失败", exc_info=True)
+
+    def _notify_progress_change(self):
+        if self.on_progress_change and self._progress_position_ms is not None:
+            try:
+                self.on_progress_change(self._progress_position_ms, self._duration_ms)
+            except Exception:
+                log.debug("[AirPlay] 进度回调失败", exc_info=True)
+
+    def _update_rtp_progress(self, start_ts: int, current_ts: int, end_ts: int):
+        wrap = 1 << 32
+        position_samples = (current_ts - start_ts) % wrap
+        duration_samples = (end_ts - start_ts) % wrap
+        self._progress_position_ms = int(position_samples * 1000 / max(1, self._sample_rate))
+        if duration_samples:
+            self._duration_ms = int(duration_samples * 1000 / max(1, self._sample_rate))
+        self._notify_progress_change()
 
     async def start(self):
         """启动 AirPlay 服务"""
@@ -400,6 +432,11 @@ class AirPlayServer:
 
                 elif method == "PAUSE":
                     self._stream_server.stop_streaming()
+                    if self.on_play_pause:
+                        try:
+                            self.on_play_pause()
+                        except Exception:
+                            log.debug("[AirPlay] 暂停回调失败", exc_info=True)
                     self._send_rtsp_response(sock, 200, cseq)
 
                 elif method == "TEARDOWN":
@@ -407,6 +444,8 @@ class AirPlayServer:
                     self._client_name = ""
                     self._metadata = {}
                     self._artwork = None
+                    self._duration_ms = None
+                    self._progress_position_ms = None
                     self._stream_server.stop_streaming()
                     teardown_done = True
                     self._safe_call_on_play_stop()
@@ -451,10 +490,17 @@ class AirPlayServer:
                                     }
                                     if key in mapping:
                                         new_meta[mapping[key]] = val
+                                    elif key == "daap.songtime":
+                                        try:
+                                            self._duration_ms = max(0, int(val))
+                                        except ValueError:
+                                            pass
                             
                             if new_meta:
                                 self._metadata = new_meta
                                 log.info(f"[Audio] 识别到歌曲信息: {new_meta}")
+                                self._notify_metadata_change()
+                            self._notify_progress_change()
                         except Exception as e:
                             log.error(f"[Audio] 解析元数据失败: {e}")
                             
@@ -465,11 +511,22 @@ class AirPlayServer:
                             img_b64 = base64.b64encode(body).decode("utf-8")
                             self._artwork = f"data:{content_type};base64,{img_b64}"
                             log.info(f"[Audio] 封面更新: {len(body)} 字节")
+                            self._notify_metadata_change()
                         except Exception as e:
                             log.error(f"[Audio] 处理封面失败: {e}")
                             
-                    elif content_type == "text/parameters":
+                    elif content_type.startswith("text/parameters"):
                         body_str = body.decode("utf-8", errors="replace")
+                        for line in body_str.replace("\r", "").split("\n"):
+                            if not line.lower().startswith("progress:"):
+                                continue
+                            try:
+                                start_ts, current_ts, end_ts = (
+                                    int(value.strip()) for value in line.split(":", 1)[1].split("/")
+                                )
+                                self._update_rtp_progress(start_ts, current_ts, end_ts)
+                            except (TypeError, ValueError):
+                                log.debug("[AirPlay] 无法解析进度参数: %s", line)
                         # 解析音量: volume: -15.00
                         if "volume:" in body_str:
                             try:
@@ -508,6 +565,8 @@ class AirPlayServer:
             self._client_name = ""
             self._metadata = {}
             self._artwork = None
+            self._duration_ms = None
+            self._progress_position_ms = None
             # 关闭所有 socket（RTP、RTCP control、timing）
             for s in (rtp_socket, control_socket, timing_socket):
                 if s:

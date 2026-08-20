@@ -106,11 +106,13 @@ class GroupBridge:
         group_controller: GroupController,
         shared_zeroconf: Zeroconf | None = None,
         config: Config | None = None,
+        audio_hub=None,
     ):
         self.host = host
         self.controller = group_controller
         self.shared_zeroconf = shared_zeroconf
         self.config = config
+        self.audio_hub = audio_hub
         self.airplay_server: AirPlayServer | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_url = ""
@@ -133,7 +135,10 @@ class GroupBridge:
         )
         self.airplay_server.on_play_start = self._on_play_start
         self.airplay_server.on_play_stop = self._on_play_stop
+        self.airplay_server.on_play_pause = self._on_play_pause
         self.airplay_server.on_volume_change = self._on_volume_change
+        self.airplay_server.on_metadata_change = self._on_metadata_change
+        self.airplay_server.on_progress_change = self._on_progress_change
         await self.airplay_server.start()
         log.info("Started Group AirPlay bridge %s on rtsp=%s", self.device_name, self.airplay_server.rtsp_port)
 
@@ -157,6 +162,22 @@ class GroupBridge:
     def _on_play_stop(self):
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._stop_target(), self._loop)
+
+    def _on_play_pause(self):
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._pause_target(), self._loop)
+
+    def _on_metadata_change(self, metadata: dict, artwork: str | None):
+        if not self.audio_hub:
+            return
+        payload = dict(metadata)
+        if artwork is not None:
+            payload["artwork"] = artwork
+        self.audio_hub.update_session_metadata(payload)
+
+    def _on_progress_change(self, position_ms: int, duration_ms: int | None):
+        if self.audio_hub:
+            self.audio_hub.update_session_progress(position_ms, duration_ms)
 
     @staticmethod
     def _vol_pct_to_db(volume: int) -> float:
@@ -211,13 +232,26 @@ class GroupBridge:
         self._session_audio_id = await self._resolve_audio_id() or custom_default or None
 
         if await self.controller.play_url(stream_url, self._session_audio_id):
+            metadata = dict(self.airplay_server.metadata if self.airplay_server else {})
+            if self.airplay_server and self.airplay_server.artwork:
+                metadata["artwork"] = self.airplay_server.artwork
+            pod_url = f"/stream/live.wav?virtual_delay={self.config.virtual_delay}"
+            session_id = self.audio_hub.begin_session(
+                "airplay1", "group_all", metadata, pod_url
+            ) if self.audio_hub else 0
+            if self.audio_hub and self.airplay_server:
+                position_ms, duration_ms = self.airplay_server.progress
+                if position_ms is not None:
+                    self.audio_hub.update_session_progress(position_ms, duration_ms)
             try:
                 from miplay.web.api import broadcast_ws
                 asyncio.create_task(broadcast_ws({
                     "type": "control_command",
                     "action": "play_url",
                     "target": "group_all",
-                    "url": f"/stream/live.wav?virtual_delay={self.config.virtual_delay}",
+                    "url": pod_url,
+                    "session_id": session_id,
+                    "metadata": metadata,
                 }))
             except Exception:
                 pass
@@ -230,12 +264,17 @@ class GroupBridge:
         self._airplay_active = False
         self._stream_url = ""
         self._session_audio_id = None
+        session_id = 0
+        if self.audio_hub:
+            session_id = self.audio_hub.get_session().get("session_id", 0)
+            self.audio_hub.end_session("airplay1")
         try:
             from miplay.web.api import broadcast_ws
             asyncio.create_task(broadcast_ws({
                 "type": "control_command",
                 "action": "stop",
                 "target": "group_all",
+                "session_id": session_id,
             }))
         except Exception:
             pass
@@ -248,6 +287,30 @@ class GroupBridge:
             self._poll_task = None
         try:
             await self.controller.stop()
+        except Exception:
+            pass
+
+    async def _pause_target(self):
+        self._airplay_active = False
+        if self._poll_task:
+            self._poll_task.cancel()
+            self._poll_task = None
+        session_id = 0
+        if self.audio_hub:
+            session_id = self.audio_hub.get_session().get("session_id", 0)
+            self.audio_hub.update_session_metadata(state="paused")
+        try:
+            from miplay.web.api import broadcast_ws
+            await broadcast_ws({
+                "type": "control_command",
+                "action": "pause",
+                "target": "group_all",
+                "session_id": session_id,
+            })
+        except Exception:
+            pass
+        try:
+            await self.controller.pause()
         except Exception:
             pass
 
