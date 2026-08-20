@@ -1,7 +1,7 @@
 # MiPlay 
 
-MiPlay（隔空妙播）是专为苹果用户和小米音箱打造的**局域网音频中枢**，它可以把小米音箱桥接为 AirPlay 1 设备、首发🔥`MiPlay 全屋组播`，另有 `Web 虚拟音箱`、`开放音频 API`、`兼容 OwnTone` 等开放式玩法。
-> 本项目参考并整合了 [MiAir](https://github.com/KiriChen-Wind/MiAir)、[miair-next](https://github.com/deerwan/miair-next)、[miservice-fork](https://pypi.org/project/miservice-fork/)、[XiaoMusic](https://github.com/hanxi/xiaomusic) 等项目的思路与部分实现，面向自用场景进行了大量重构。
+MiPlay（隔空妙播）是专为苹果用户和小米音箱打造的**局域网音频中枢**，它可以把小米音箱桥接为 AirPlay 1 设备、首发🔥`MiPlay 全屋播放`，另有 `Web 虚拟音箱`、`通用音频 API`、`兼容 OwnTone` 等开放式玩法。
+> 本项目参考了[airplay2-receiver](https://github.com/openairplay/airplay2-receiver)、[MiAir](https://github.com/KiriChen-Wind/MiAir)、[miair-next](https://github.com/deerwan/miair-next)、[miservice-fork](https://pypi.org/project/miservice-fork/)、[XiaoMusic](https://github.com/hanxi/xiaomusic) 等项目的部分思路，面向自用场景进行了大量重构。
 
 ![miplay-1.webp](./img/miplay-1.webp)
 
@@ -10,29 +10,29 @@ MiPlay（隔空妙播）是专为苹果用户和小米音箱打造的**局域网
 ## ✨ 功能特色
 
 - 🚀 **桥接 AirPlay 1**：局域网直连播放，低延迟无损直通
-- 🔥 **全屋组播 Beta**：苹果系统级兼容`小米妙播·全屋播放`
-  - 基于 AirPlay 1，建议 5G WiFi 音箱）
-- 🌐 **Web 虚拟音箱**：打开网页变身虚拟音箱，全屋组播同步发声
-- 🔌 **开放音频 API**：标准的流媒体接口，轻松对接音乐库
-- 🔥 **接入 OwnTone**：可跨协议实现`多房间播放`（OwnTone 支持 AirPlay 1&2、Chromecast、DLNA 等）
-- 📦 **双架构通用**：支持 x86、arm64 架构的 PC、Mac、Linux 设备
+- 🔥 **多房间同步播放**：基于 AirPlay 1 的定制版`全屋播放`
+- 🌐 **Web 虚拟音箱**：任意网页变虚拟音箱，展示歌曲信息
+- 🔌 **通用音频 API**：标准的流媒体接口，轻松对接音乐库
+- 🔥 **接入 OwnTone**：兼容跨协议的`多房间播放`
+  - OwnTone 支持 AirPlay 1&2、Chromecast、DLNA 等
+- 📦 **多平台通用**：支持 x86、arm64 架构，使用 Docker、uv 部署
 
-> MiPlay 可以实现小米无线音箱 ➡️ AirPlay 1，虽然很便利，但普遍音质一般。若想要更好的音质表现，推荐传统有线音箱 ➡️ AirPlay 1&2（🔍 Shairport-Sync）
+> 小米音箱基本都是无线连接，MiPlay 暂不支持更复杂的 AirPlay 2 协议，推荐传统音箱搭配 `Shairport Sync`(AirPlay2)，音质和体验更完美。
 
 ### 📊 音频方案与协议对比
 
 | 对比维度 | MiPlay | AirPlay 1| AirPlay 2 | DLNA | 小米妙播 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **系统级音频投射** | ✅ 全家桶 | ✅ 全家桶 | ✅ 全家桶 | ❌ 部分 App |  ✅ 全家桶 |
-| **多房间同步播放** | ✅ 组播 Beta | ☑️ 仅限 iTunes | ✅ 支持 | ❌ 不支持 | ✅ 支持 |
+| **多房间同步播放** | ✅ 支持 | ☑️ 仅限 iTunes | ✅ 支持 | ❌ 不支持 | ✅ 支持 |
 | **音频通信链路** | ☑️ 同步串流 | ☑️ 同步串流 | ✅ 独立协同 | ☑️ 分离遥控 | ✅ 独立协同 |
 | **小米音箱兼容性** | ✅ 全系音箱 | ☑️ Sound 系列  | ☑️ Sound 系列 | ☑️ 部分音箱 | ☑️ 部分音箱 |
 | **OwnTone 兼容性** | ✅ 支持 | ✅ 支持  | ✅ 支持| ☑️ 部分音箱 | ❌ 不支持 |
 | **硬件加密门槛** |  ✅ 无门槛 | ☑️ 苹果授权 | ☑️ 苹果授权 | ✅ 无门槛 | 🔒 小米独占 |
 
 ⚠️ 本项目主要是完善苹果用户的小米音箱 ✖️ AirPlay 体验，暂不考虑 DLNA 功能。
-- DLNA 是一个古早的音频协议，虽然新老设备都能用，但整体体验不太好、稳定性欠佳
-- 小米小爱音箱自带 DLNA 功能不完整，第三方 DLNA 需额外适配，体验依然不完美
+- DLNA 是一个古早的音频协议，虽然新老设备都能用，但体验不太好、稳定性欠佳
+- 小米音箱自带 DLNA 功能不完整，第三方 DLNA 需额外适配，体验依然不完美
 - 如果需要第三方 DLNA 功能，推荐使用 MiAir、miair-next 等项目
 
 ## 🔄 业务工作流程
@@ -51,8 +51,8 @@ flowchart TD
         
         B --> C{"播放模式"}
         
-        C -->|独立单播| D["📢 小米音箱 1<br/>(AirPlay)"]
-        C -->|全屋组播| E
+        C -->|独立播放| D["📢 小米音箱 1<br/>(AirPlay)"]
+        C -->|全屋播放| E
         
         subgraph E ["🏠 虚拟中转 (AirPlay)"]
             direction LR

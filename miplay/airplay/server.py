@@ -151,6 +151,7 @@ class AirPlayServer:
         self.on_play_start: Callable | None = None
         self.on_play_stop: Callable | None = None
         self.on_play_pause: Callable | None = None
+        self.on_play_resume: Callable | None = None
         self.on_volume_change: Callable[[float], None] | None = None
         self.on_metadata_change: Callable[[dict, str | None], None] | None = None
         self.on_progress_change: Callable[[int, int | None], None] | None = None
@@ -455,7 +456,12 @@ class AirPlayServer:
                 elif method == "FLUSH":
                     log.info("[AirPlay] RTSP FLUSH: 清空音频缓冲区")
                     # 仅清空队列，不停止流服务器，避免断开客户端
-                    self._stream_server.start_streaming() 
+                    self._stream_server.start_streaming()
+                    if self.on_play_resume:
+                        try:
+                            self.on_play_resume()
+                        except Exception:
+                            log.debug("[AirPlay] 恢复回调失败", exc_info=True)
                     self._send_rtsp_response(sock, 200, cseq)
 
                 elif method == "GET_PARAMETER":
@@ -498,6 +504,9 @@ class AirPlayServer:
                             
                             if new_meta:
                                 self._metadata = new_meta
+                                # 新歌曲的 ID3 通常先于封面到达，不能继续把上一首封面
+                                # 当成当前歌曲封面广播。
+                                self._artwork = None
                                 log.info(f"[Audio] 识别到歌曲信息: {new_meta}")
                                 self._notify_metadata_change()
                             self._notify_progress_change()

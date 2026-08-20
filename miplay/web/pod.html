@@ -38,6 +38,9 @@
       --utility-track-right-gap: 76px;
       /* 播放控制组宽度。 */
       --transport-width: 480px;
+      /* 横屏信息区的轻微纵向校正；四个分区仍保持等高。 */
+      --copy-offset-y: -10px;
+      --controls-offset-y: 10px;
 
       /* ===== 字号与文字间距：可直接独立调整 ===== */
       /* 歌曲名字号、字重、行高。 */
@@ -163,32 +166,47 @@
     }
 
     .artwork-shell {
+      position: relative;
       width: var(--content-size);
       height: var(--content-size);
-      display: grid;
-      place-items: center;
       overflow: hidden;
       border-radius: 28px;
+      background: transparent;
+      perspective: 1000px;
+    }
+
+    .artwork-media {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: var(--artwork-width, var(--content-size));
+      height: var(--artwork-height, var(--content-size));
+      transform: translate(-50%, -50%);
+      overflow: hidden;
+      border-radius: 28px;
+      transform-origin: center;
     }
 
     .artwork {
       display: block;
       width: 100%;
       height: 100%;
-      object-fit: contain;
+      object-fit: cover;
       object-position: center;
-      opacity: 0;
-      transition: opacity .45s ease;
     }
 
-    .artwork.ready { opacity: 1; }
+    .artwork-media.artwork-switch { animation: artwork-flip .8s cubic-bezier(.22, .75, .2, 1) both; }
+    @keyframes artwork-flip {
+      0% { transform: translate(-50%, -50%) rotateY(0deg); }
+      48% { transform: translate(-50%, -50%) rotateY(90deg); }
+      100% { transform: translate(-50%, -50%) rotateY(0deg); }
+    }
 
     .artwork-fallback {
       position: absolute;
-      left: 16px;
-      top: 16px;
-      width: var(--content-size);
-      height: var(--content-size);
+      inset: 0;
+      width: 100%;
+      height: 100%;
       display: grid;
       place-items: center;
       border-radius: 28px;
@@ -196,6 +214,7 @@
       color: rgba(255, 255, 255, .32);
       background: transparent;
       overflow: hidden;
+      z-index: 2;
     }
 
     /* 必须显式覆盖 display:grid，否则 hidden 属性可能无法隐藏默认 poster。 */
@@ -354,6 +373,7 @@
     .copy {
       grid-row: 2;
       flex-direction: column;
+      transform: translateY(var(--copy-offset-y));
     }
 
     .copy-inner { width: var(--media-content-width); min-width: 0; }
@@ -365,14 +385,17 @@
     .marquee-viewport.is-overflow { text-align: left; }
     .marquee-content { display: inline-block; white-space: nowrap; transform: translateX(0); }
     .marquee-content.is-overflow {
+      display: flex;
+      width: max-content;
+      gap: var(--marquee-gap, 2em);
       animation-name: pod-marquee;
       animation-timing-function: linear;
       animation-iteration-count: infinite;
       animation-delay: 1.2s;
     }
     @keyframes pod-marquee {
-      0%, 16% { transform: translateX(0); }
-      84%, 100% { transform: translateX(var(--marquee-shift)); }
+      0%, 12% { transform: translateX(0); }
+      88%, 100% { transform: translateX(var(--marquee-shift)); }
     }
 
     .title {
@@ -405,6 +428,7 @@
 
     .controls {
       grid-row: 3;
+      transform: translateY(var(--controls-offset-y));
     }
 
     .controls-inner {
@@ -486,6 +510,8 @@
       background: #fff;
     }
 
+    .progress-fill.empty { visibility: hidden; }
+
     .times {
       margin-top: var(--track-time-gap);
       display: flex;
@@ -513,11 +539,17 @@
         top: 0;
         right: var(--utility-track-right-gap);
       }
+
+      .copy,
+      .controls {
+        transform: none;
+      }
     }
 
     @media (prefers-reduced-motion: reduce) {
       #fluid { filter: blur(72px); }
-      .artwork { transition: none; }
+      .artwork-media { animation: none !important; }
+      .artwork-fallback { transition: none; }
     }
   </style>
 </head>
@@ -528,12 +560,14 @@
   <main class="layout" aria-label="MiPlay 虚拟音箱">
     <section class="stage art-stage" aria-label="专辑封面">
       <div class="design art-design">
-        <div class="artwork-fallback" id="artworkFallback">
-          <img class="fallback-poster" id="fallbackPoster" src="/static/poster.png" alt="">
-          <i data-lucide="music-4"></i>
-        </div>
         <div class="artwork-shell">
-          <img class="artwork" id="artwork" alt="">
+          <div class="artwork-media" id="artworkMedia">
+            <div class="artwork-fallback" id="artworkFallback">
+              <img class="fallback-poster" id="fallbackPoster" src="/static/poster.png" alt="">
+              <i data-lucide="music-4"></i>
+            </div>
+            <img class="artwork" id="artwork" alt="">
+          </div>
         </div>
       </div>
     </section>
@@ -616,6 +650,11 @@
       let wakeLock = null;
       let palette = FALLBACK_COLORS.slice();
       let paletteArtwork = "";
+      let artworkFallbackTimer = 0;
+      let artworkRequestId = 0;
+      let pendingArtworkSource = "";
+      let awaitingArtworkTrackKey = "";
+      let currentTrackKey = "";
       let animationFrame = 0;
       let isMaster = !window.BroadcastChannel;
       const tabId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -647,6 +686,12 @@
         const size = portrait
           ? Math.min(widthAvailable, (heightAvailable - gap) / 2)
           : Math.min(heightAvailable, (widthAvailable - gap) / 2);
+        /* 宽而细长的横屏设备中，95% 画布尺寸会把封面贴到上下边缘。
+           按视口宽高比平滑收窄内容区，最多保留约 24px 的上下呼吸空间。 */
+        const aspect = vw / Math.max(1, vh);
+        const wideProgress = portrait ? 0 : clamp((aspect - 1.55) / .75, 0, 1);
+        const contentSize = 608 - Math.round(wideProgress * 48);
+        const contentRatio = contentSize / 608;
         const root = document.documentElement.style;
         root.setProperty("--stage-size", `${Math.max(1, size)}px`);
         root.setProperty("--design-scale", String(Math.max(1, size) / DESIGN_SIZE));
@@ -655,6 +700,11 @@
         root.setProperty("--safe-right", `${safeRight}px`);
         root.setProperty("--safe-top", `${safeTop}px`);
         root.setProperty("--safe-bottom", `${safeBottom}px`);
+        root.setProperty("--content-size", `${contentSize}px`);
+        root.setProperty("--zone-height", `${contentSize / 4}px`);
+        root.setProperty("--media-content-width", `${Math.round(520 * contentRatio)}px`);
+        root.setProperty("--utility-track-width", `${Math.round(368 * contentRatio)}px`);
+        root.setProperty("--transport-width", `${Math.round(480 * contentRatio)}px`);
         resizeBackground();
       }
 
@@ -740,41 +790,100 @@
         }
       }
 
-      function setArtwork(source) {
+      function showFallbackArtwork() {
+        const image = $("artwork");
+        const media = $("artworkMedia");
+        const fallback = $("artworkFallback");
+        fallback.hidden = false;
+        image.removeAttribute("src");
+        image.dataset.source = "";
+        image.classList.remove("ready");
+        media.style.removeProperty("--artwork-width");
+        media.style.removeProperty("--artwork-height");
+        pendingArtworkSource = "";
+        fallback.classList.remove("poster-error");
+        paletteArtwork = "";
+        palette = FALLBACK_COLORS.slice();
+      }
+
+      function imageHasArtwork() {
+        const image = $("artwork");
+        return image.classList.contains("ready") && Boolean(image.dataset.source);
+      }
+
+      function setArtwork(source, keepPreviousBriefly = false) {
         const image = $("artwork");
         const fallback = $("artworkFallback");
+        const media = $("artworkMedia");
+        clearTimeout(artworkFallbackTimer);
         if (!source) {
-          image.removeAttribute("src");
-          image.dataset.source = "";
-          image.classList.remove("ready");
-          fallback.hidden = false;
-          fallback.classList.remove("poster-error");
-          paletteArtwork = "";
-          palette = FALLBACK_COLORS.slice();
+          pendingArtworkSource = "";
+          const requestId = ++artworkRequestId;
+          if (keepPreviousBriefly && image.classList.contains("ready")) {
+            artworkFallbackTimer = window.setTimeout(() => {
+              if (requestId !== artworkRequestId) return;
+              media.classList.remove("artwork-switch");
+              void media.offsetWidth;
+              media.classList.add("artwork-switch");
+              window.setTimeout(() => {
+                if (requestId === artworkRequestId) showFallbackArtwork();
+              }, 400);
+            }, 600);
+          } else {
+            showFallbackArtwork();
+          }
           return;
         }
-        if (image.dataset.source === source) return;
-        /* 真实封面与默认 poster 共用同一显示位置；收到 URL 后立即隐藏 poster，禁止叠图。 */
-        fallback.hidden = true;
-        image.dataset.source = source;
-        image.classList.remove("ready");
-        image.crossOrigin = "anonymous";
-        image.onload = () => {
-          image.classList.add("ready");
-          extractPalette(image, source);
+        if (image.dataset.source === source || pendingArtworkSource === source) return;
+        const requestId = ++artworkRequestId;
+        pendingArtworkSource = source;
+        /* 先用临时图片预加载，旧封面在新封面成功前始终留在画面上。 */
+        const hadArtwork = image.classList.contains("ready") && Boolean(image.dataset.source);
+        const pending = new Image();
+        pending.crossOrigin = "anonymous";
+        pending.onload = () => {
+          if (requestId !== artworkRequestId) return;
+          const ratio = pending.naturalWidth / Math.max(1, pending.naturalHeight);
+          const maxSize = safeNumber(parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--content-size")), 608);
+          const width = ratio >= 1 ? maxSize : Math.max(1, Math.round(maxSize * ratio));
+          const height = ratio >= 1 ? Math.max(1, Math.round(maxSize / ratio)) : maxSize;
+          const commitArtwork = () => {
+            if (requestId !== artworkRequestId) return;
+            pendingArtworkSource = "";
+            media.style.setProperty("--artwork-width", `${width}px`);
+            media.style.setProperty("--artwork-height", `${height}px`);
+            image.src = source;
+            image.dataset.source = source;
+            image.classList.add("ready");
+            extractPalette(pending, source);
+            fallback.hidden = true;
+          };
+          if (hadArtwork) {
+            media.classList.remove("artwork-switch");
+            void media.offsetWidth;
+            media.classList.add("artwork-switch");
+            window.setTimeout(commitArtwork, 400);
+            window.setTimeout(() => media.classList.remove("artwork-switch"), 820);
+          } else {
+            commitArtwork();
+          }
         };
-        image.onerror = () => {
-          image.classList.remove("ready");
-          fallback.hidden = false;
+        pending.onerror = () => {
+          if (requestId !== artworkRequestId) return;
+          pendingArtworkSource = "";
+          if (!hadArtwork) fallback.hidden = false;
           fallback.classList.remove("poster-error");
         };
-        image.src = source;
+        pending.src = source;
       }
 
       function updateMarquee(contentId, viewportId) {
         const content = $(contentId);
         const viewport = $(viewportId);
         if (viewport.hidden) return;
+        const text = content.dataset.marqueeText || content.textContent;
+        content.dataset.marqueeText = text;
+        content.textContent = text;
         viewport.classList.remove("is-overflow");
         content.classList.remove("is-overflow");
         content.style.removeProperty("--marquee-shift");
@@ -782,11 +891,20 @@
         requestAnimationFrame(() => {
           const overflow = Math.max(0, content.scrollWidth - viewport.clientWidth);
           if (overflow <= 1) return;
-          /* 长文本移动到末尾后循环；速度约 34 设计像素/秒。 */
-          content.style.setProperty("--marquee-shift", `${-overflow}px`);
-          content.style.setProperty("animation-duration", `${Math.max(8, overflow / 34 + 4)}s`);
+          /* 两份相同文本首尾衔接，间隔约 4 个字母或 2 个汉字，始终向左循环。 */
+          content.replaceChildren(
+            Object.assign(document.createElement("span"), { textContent: text }),
+            Object.assign(document.createElement("span"), { textContent: text })
+          );
           viewport.classList.add("is-overflow");
           content.classList.add("is-overflow");
+          requestAnimationFrame(() => {
+            const first = content.firstElementChild;
+            const gap = parseFloat(getComputedStyle(content).columnGap) || 0;
+            const distance = first.getBoundingClientRect().width + gap;
+            content.style.setProperty("--marquee-shift", `${-distance}px`);
+            content.style.setProperty("animation-duration", `${Math.max(9, distance / 34 + 3)}s`);
+          });
         });
       }
 
@@ -794,6 +912,12 @@
         updateMarquee("trackTitle", "titleViewport");
         updateMarquee("trackArtist", "artistViewport");
         updateMarquee("trackAlbum", "albumViewport");
+      }
+
+      function setMarqueeText(contentId, text) {
+        const content = $(contentId);
+        content.dataset.marqueeText = text;
+        content.textContent = text;
       }
 
       function icon(name) {
@@ -820,10 +944,18 @@
       function renderProgress() {
         const progress = currentSession && currentSession.progress;
         const duration = safeNumber(progress && progress.duration_ms);
-        const visible = duration > 0;
+        const active = currentSession && (currentSession.state === "playing" || currentSession.state === "paused");
+        const visible = active && duration > 0;
         $("progressBlock").classList.toggle("visible", visible);
-        if (!visible) return;
+        if (!visible) {
+          $("progressFill").classList.add("empty");
+          $("progressFill").style.width = "0%";
+          $("currentTime").textContent = "0:00";
+          $("durationTime").textContent = "--:--";
+          return;
+        }
         const position = progressPosition(currentSession);
+        $("progressFill").classList.toggle("empty", position <= 0);
         $("progressFill").style.width = `${clamp(position / duration * 100, 0, 100)}%`;
         $("currentTime").textContent = formatTime(position);
         $("durationTime").textContent = formatTime(duration);
@@ -837,19 +969,34 @@
         currentSession = session;
         const playing = session.state === "playing" || session.state === "paused";
         const metadata = session.metadata || {};
-        $("trackTitle").textContent = playing && metadata.title ? metadata.title : "MiPlay 全屋播放";
-        const artist = playing && metadata.artist ? metadata.artist : "";
-        const album = playing && metadata.album ? metadata.album : "";
-        $("trackArtist").textContent = artist || "等待播放";
-        $("trackAlbum").textContent = album;
+        const hasSong = playing && Boolean(metadata.title || metadata.artist || metadata.album || metadata.artwork);
+        const artist = hasSong && metadata.artist ? metadata.artist : "";
+        const album = hasSong && metadata.album ? metadata.album : "";
+        const trackKey = hasSong ? `${metadata.title || ""}\u0000${artist}\u0000${album}` : "";
+        const trackChanged = Boolean(currentTrackKey && trackKey && trackKey !== currentTrackKey);
+        currentTrackKey = trackKey;
+        setMarqueeText("trackTitle", hasSong && metadata.title ? metadata.title : "MiPlay 全屋播放");
+        setMarqueeText("trackArtist", hasSong ? (artist || "等待播放") : "等待播放");
+        setMarqueeText("trackAlbum", hasSong ? album : "");
         $("albumViewport").hidden = !album;
         updateMetadataMarquees();
-        setArtwork(playing ? metadata.artwork : "");
+        if (!hasSong) {
+          awaitingArtworkTrackKey = "";
+          setArtwork("");
+        } else if (metadata.artwork) {
+          awaitingArtworkTrackKey = "";
+          setArtwork(metadata.artwork);
+        } else if (trackChanged) {
+          awaitingArtworkTrackKey = trackKey;
+          setArtwork("", true);
+        } else if (awaitingArtworkTrackKey !== trackKey && !imageHasArtwork()) {
+          setArtwork("");
+        }
 
         const capabilities = session.capabilities || {};
-        $("previousButton").disabled = !capabilities.previous;
-        $("nextButton").disabled = !capabilities.next;
-        $("playPauseButton").disabled = !capabilities.play_pause;
+        $("previousButton").disabled = !hasSong || !capabilities.previous;
+        $("nextButton").disabled = !hasSong || !capabilities.next;
+        $("playPauseButton").disabled = !hasSong || !capabilities.play_pause;
         $("playPauseButton").innerHTML = icon(session.state === "playing" ? "pause" : "play");
         $("playPauseButton").setAttribute("aria-label", session.state === "playing" ? "暂停" : "播放");
         refreshIcons();

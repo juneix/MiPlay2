@@ -310,7 +310,7 @@ class BridgeManager:
                 log.info("Started Group AirPlay bridge endpoint: %s", self.config.group.airplay_name)
 
     def get_group_audio_stream_server(self):
-        """获取当前全屋组播的 AudioStreamServer 实例。"""
+        """获取当前全屋播放的 AudioStreamServer 实例。"""
         if self.group_bridge and self.group_bridge.airplay_server:
             return self.group_bridge.airplay_server.audio_stream
         if self.shairport_bridge and hasattr(self.shairport_bridge, "stream_server"):

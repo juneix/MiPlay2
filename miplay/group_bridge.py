@@ -136,6 +136,7 @@ class GroupBridge:
         self.airplay_server.on_play_start = self._on_play_start
         self.airplay_server.on_play_stop = self._on_play_stop
         self.airplay_server.on_play_pause = self._on_play_pause
+        self.airplay_server.on_play_resume = self._on_play_resume
         self.airplay_server.on_volume_change = self._on_volume_change
         self.airplay_server.on_metadata_change = self._on_metadata_change
         self.airplay_server.on_progress_change = self._on_progress_change
@@ -167,12 +168,21 @@ class GroupBridge:
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._pause_target(), self._loop)
 
+    def _on_play_resume(self):
+        if not self._loop or not self._loop.is_running():
+            return
+        def resume():
+            if self.audio_hub:
+                self.audio_hub.update_session_metadata(state="playing")
+            self._airplay_active = True
+            self._start_poll()
+        self._loop.call_soon_threadsafe(resume)
+
     def _on_metadata_change(self, metadata: dict, artwork: str | None):
         if not self.audio_hub:
             return
         payload = dict(metadata)
-        if artwork is not None:
-            payload["artwork"] = artwork
+        payload["artwork"] = artwork or ""
         self.audio_hub.update_session_metadata(payload)
 
     def _on_progress_change(self, position_ms: int, duration_ms: int | None):

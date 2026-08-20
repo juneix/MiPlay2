@@ -175,7 +175,7 @@
       <h2>1. 输出音箱</h2>
       <div class="form-group">
         <select id="playTarget">
-          <option value="group_all">🏠 全屋组播 (小米音箱 + 虚拟音箱)</option>
+          <option value="group_all">🏠 全屋播放 (小米音箱 + 虚拟音箱)</option>
         </select>
       </div>
     </div>
@@ -334,7 +334,7 @@
       return sel;
     }
 
-    // 1. 初始化加载所有目标音箱 (全屋组播 + 动态虚拟音箱 + 真实小米音箱)
+    // 1. 初始化加载所有目标音箱 (全屋播放 + 动态虚拟音箱 + 真实小米音箱)
     async function loadTargets() {
       try {
         const res = await fetch("/api/setting").then(r => r.json());
@@ -342,10 +342,10 @@
         const currentSelected = select.value;
         select.innerHTML = "";
 
-        // 全屋组播
+        // 全屋播放
         const groupOpt = document.createElement("option");
         groupOpt.value = "group_all";
-        groupOpt.textContent = "🏠 全屋组播 (小米音箱 + 虚拟音箱)";
+        groupOpt.textContent = "🏠 全屋播放 (小米音箱 + 虚拟音箱)";
         select.appendChild(groupOpt);
 
         // 动态遍历局域网各在线 Web 虚拟音箱
