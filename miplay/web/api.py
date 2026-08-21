@@ -247,6 +247,21 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         pod_path = os.path.join(os.path.dirname(__file__), "pod.html")
         return web.FileResponse(pod_path)
 
+    async def handle_pod_manifest(request: web.Request):
+        manifest_path = os.path.join(os.path.dirname(__file__), "pod-manifest.webmanifest")
+        return web.FileResponse(manifest_path, headers={"Content-Type": "application/manifest+json"})
+
+    async def handle_pod_service_worker(request: web.Request):
+        worker_path = os.path.join(os.path.dirname(__file__), "pod-sw.js")
+        return web.FileResponse(
+            worker_path,
+            headers={
+                "Content-Type": "application/javascript",
+                "Service-Worker-Allowed": "/pod",
+                "Cache-Control": "no-cache",
+            },
+        )
+
     async def handle_get_setting(request: web.Request):
         need_device_list = request.query.get("need_device_list", "false") == "true"
         client_ip = request.remote or "127.0.0.1"
@@ -724,6 +739,8 @@ def create_web_app(config: Config, app_instance) -> web.Application:
 
     web_app.router.add_get("/", handle_index)
     web_app.router.add_get("/pod", handle_pod_page)
+    web_app.router.add_get("/pod/manifest.webmanifest", handle_pod_manifest)
+    web_app.router.add_get("/pod/sw.js", handle_pod_service_worker)
     web_app.router.add_get("/test", handle_test_page)
     web_app.router.add_get("/api/setting", handle_get_setting)
     web_app.router.add_post("/api/setting", handle_save_setting)

@@ -1,0 +1,20 @@
+{
+  "name": "MiPlay 虚拟音箱",
+  "short_name": "MiPlay Pod",
+  "description": "MiPlay 全屋播放虚拟音箱",
+  "lang": "zh-CN",
+  "start_url": "/pod",
+  "scope": "/pod",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#08090d",
+  "theme_color": "#08090d",
+  "icons": [
+    {
+      "src": "/static/icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

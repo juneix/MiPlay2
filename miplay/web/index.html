@@ -868,6 +868,25 @@
       color: var(--accent);
     }
 
+    .status-chip.port-active {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .mode-tabs {
+      background: var(--status-idle-bg) !important;
+    }
+
+    .tab-btn {
+      color: var(--muted);
+    }
+
+    .tab-btn.active {
+      background: var(--panel) !important;
+      color: var(--ink);
+      box-shadow: 0 1px 3px rgba(23, 33, 43, 0.12) !important;
+    }
+
     .loading {
       text-align: center;
       padding: 24px;
@@ -1513,8 +1532,8 @@
             </button>
           </div>
           <div style="display:flex; gap:8px; align-items:center; margin-left:auto;">
-            <div class="mode-tabs" style="display:flex; background:rgba(0,0,0,0.06); padding:3px; border-radius:8px;">
-              <button class="tab-btn active" id="tabNormalBtn" type="button" style="padding:4px 10px; font-size:13px; border:none; background:#ffffff; border-radius:6px; cursor:pointer; font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,0.1);">普通</button>
+            <div class="mode-tabs" style="display:flex; padding:3px; border-radius:8px;">
+              <button class="tab-btn active" id="tabNormalBtn" type="button" style="padding:4px 10px; font-size:13px; border:none; border-radius:6px; cursor:pointer; font-weight:600;">普通</button>
               <button class="tab-btn" id="tabGroupBtn" type="button" style="padding:4px 10px; font-size:13px; border:none; background:transparent; border-radius:6px; cursor:pointer; font-weight:500;">全屋</button>
             </div>
           </div>
@@ -1732,331 +1751,7 @@
       notifyHint: null
     };
 
-    let currentClientIp = window.location.hostname || "127.0.0.1";
-    let isAudioUnlocked = false;
-    let virtualRelayAudio = null;
-    let delayTimer = null;
-    let virtualDelay = 2000; // 默认 2000ms，用于全屋 PCM 内容缓冲或远程 URL 启动等待
-    let currentVirtualAudioTarget = "group_all";
-    let currentVirtualAudioDelay = virtualDelay;
-
-    // ---- 客户端设备标识 ----
-    function getOrCreateDeviceId() {
-      try {
-        let id = localStorage.getItem("miplay_device_uuid");
-        if (!id) {
-          id = "dev_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
-          localStorage.setItem("miplay_device_uuid", id);
-        }
-        return id;
-      } catch (e) {
-        if (!window._fallbackDevId) {
-          window._fallbackDevId = "dev_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
-        }
-        return window._fallbackDevId;
-      }
-    }
-
-    // ---- 同设备多 Tab 先来后到排他发声与自动交接 ----
-    let isAudioMasterTab = true;
-    let tabChannel = null;
-    const tabInstanceId = "tab_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now();
-
-    function initTabSync() {
-      if (!window.BroadcastChannel) {
-        isAudioMasterTab = true;
-        return;
-      }
-      try {
-        tabChannel = new BroadcastChannel("miplay_tab_channel");
-        tabChannel.postMessage({ type: "who_is_master", tabId: tabInstanceId });
-
-        let electionTimer = setTimeout(() => {
-          isAudioMasterTab = true;
-          tabChannel.postMessage({ type: "claim_master", tabId: tabInstanceId });
-        }, 250);
-
-        tabChannel.onmessage = (e) => {
-          const data = e.data || {};
-          if (data.type === "who_is_master") {
-            if (isAudioMasterTab) {
-              tabChannel.postMessage({ type: "i_am_master", tabId: tabInstanceId });
-            }
-          } else if (data.type === "i_am_master") {
-            if (data.tabId !== tabInstanceId) {
-              clearTimeout(electionTimer);
-              isAudioMasterTab = false;
-              if (virtualRelayAudio && !virtualRelayAudio.paused) {
-                virtualRelayAudio.pause();
-                virtualRelayAudio.src = "";
-              }
-            }
-          } else if (data.type === "claim_master") {
-            if (data.tabId !== tabInstanceId) {
-              clearTimeout(electionTimer);
-              isAudioMasterTab = false;
-            }
-          } else if (data.type === "master_closed") {
-            isAudioMasterTab = true;
-            tabChannel.postMessage({ type: "claim_master", tabId: tabInstanceId });
-            renderDeviceList();
-          }
-        };
-
-        window.addEventListener("pagehide", () => {
-          if (isAudioMasterTab && tabChannel) {
-            tabChannel.postMessage({ type: "master_closed", tabId: tabInstanceId });
-          }
-        });
-      } catch (err) {
-        isAudioMasterTab = true;
-      }
-    }
-
-    // ---- WebSocket 在线探活与断连即刻注销 ----
-    let wsClient = null;
-    let wsReconnectTimer = null;
-    let screenWakeLock = null;
-
-    async function acquireWakeLock() {
-      try {
-        if ("wakeLock" in navigator && !screenWakeLock) {
-          screenWakeLock = await navigator.wakeLock.request("screen");
-          screenWakeLock.addEventListener("release", () => { screenWakeLock = null; });
-        }
-      } catch (e) {}
-    }
-
-    function releaseWakeLock() {
-      if (screenWakeLock) {
-        screenWakeLock.release().catch(() => {});
-        screenWakeLock = null;
-      }
-    }
-
-    function updateMediaSession(isPlaying, title = "MiPlay 音频流") {
-      if ("mediaSession" in navigator) {
-        if (isPlaying) {
-          navigator.mediaSession.metadata = new MediaMetadata({
-            title: title,
-            artist: "MiPlay 虚拟音箱",
-            album: "MiPlay",
-            artwork: [{ src: "/static/icon.png", sizes: "512x512", type: "image/png" }]
-          });
-          navigator.mediaSession.playbackState = "playing";
-          navigator.mediaSession.setActionHandler("play", () => {
-            virtualRelayAudio && virtualRelayAudio.play();
-          });
-          navigator.mediaSession.setActionHandler("pause", () => {
-            virtualRelayAudio && virtualRelayAudio.pause();
-          });
-          navigator.mediaSession.setActionHandler("stop", () => {
-            virtualRelayAudio && virtualRelayAudio.pause();
-          });
-        } else {
-          navigator.mediaSession.playbackState = "paused";
-        }
-      }
-    }
-
-    function connectWebSocket() {
-      if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
-      if (wsClient && (wsClient.readyState === WebSocket.OPEN || wsClient.readyState === WebSocket.CONNECTING)) {
-        return;
-      }
-
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const deviceId = getOrCreateDeviceId();
-      const wsUrl = `${protocol}//${window.location.host}/api/ws?device_id=${encodeURIComponent(deviceId)}`;
-
-      try {
-        wsClient = new WebSocket(wsUrl);
-
-        wsClient.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            if (msg.type === "session_init") {
-              if (msg.client_ip) {
-                currentClientIp = msg.client_ip;
-              }
-              if (typeof msg.virtual_delay === "number") {
-                virtualDelay = msg.virtual_delay;
-              }
-              if (Array.isArray(msg.virtual_speakers)) {
-                virtualSpeakers = msg.virtual_speakers;
-              }
-              renderDeviceList();
-            } else if (msg.type === "presence_update") {
-              if (Array.isArray(msg.virtual_speakers)) {
-                virtualSpeakers = msg.virtual_speakers;
-                renderDeviceList();
-              }
-            } else if (msg.type === "control_command") {
-              const target = msg.target || "group_all";
-              const action = msg.action || "play_url";
-              const myDevId = getOrCreateDeviceId();
-              const isMatch = (
-                target === "group_all" ||
-                target === "virtual_all" ||
-                target === "virtual_web" ||
-                target === `virtual_${myDevId}` ||
-                target === `virtual_${currentClientIp}`
-              );
-              if (isMatch) {
-                if (action === "play_url" && msg.url) {
-                  if (delayTimer) {
-                    clearTimeout(delayTimer);
-                    delayTimer = null;
-                  }
-                  const playUrl = msg.url.startsWith("/")
-                    ? (window.location.origin + msg.url + (msg.url.includes("?") ? "&" : "?") + "_t=" + Date.now())
-                    : msg.url;
-                  const parsedUrl = new URL(playUrl, window.location.origin);
-                  const isBufferedPcm = parsedUrl.origin === window.location.origin
-                    && (parsedUrl.pathname === "/stream/live.wav" || parsedUrl.pathname === "/stream/group.wav");
-                  const configuredPcmDelay = Number.parseInt(parsedUrl.searchParams.get("virtual_delay") || "0", 10);
-                  const delayMs = isBufferedPcm
-                    ? Math.max(0, Math.min(5000, Number.isFinite(configuredPcmDelay) ? configuredPcmDelay : 0))
-                    : ((target === "group_all" || target === "virtual_all") ? virtualDelay : 0);
-                  currentVirtualAudioTarget = target;
-                  currentVirtualAudioDelay = delayMs;
-                  reportVirtualAudioEvent("command_received", { target, virtual_delay: delayMs });
-                  if (virtualRelayAudio) {
-                    virtualRelayAudio.pause();
-                    virtualRelayAudio.src = "";
-                  }
-                  if (isAudioMasterTab && isAudioUnlocked && virtualRelayAudio) {
-                    if (!isBufferedPcm && delayMs > 0) {
-                      reportVirtualAudioEvent("scheduled", { target, virtual_delay: delayMs });
-                      delayTimer = setTimeout(() => {
-                        if (virtualRelayAudio) {
-                          reportVirtualAudioEvent("play_call", { target, virtual_delay: delayMs });
-                          virtualRelayAudio.src = playUrl;
-                          virtualRelayAudio.play().catch((e) => {
-                            reportVirtualAudioEvent("play_error", { target, virtual_delay: delayMs, error: String(e) });
-                          });
-                        }
-                        delayTimer = null;
-                      }, delayMs);
-                    } else {
-                      reportVirtualAudioEvent("play_call", { target, virtual_delay: delayMs });
-                      virtualRelayAudio.src = playUrl;
-                      virtualRelayAudio.play().catch((e) => {
-                        reportVirtualAudioEvent("play_error", { target, virtual_delay: delayMs, error: String(e) });
-                      });
-                    }
-                  }
-                } else if (action === "stop" || action === "pause") {
-                  reportVirtualAudioEvent("command_received", { target, virtual_delay: currentVirtualAudioDelay });
-                  if (delayTimer) {
-                    clearTimeout(delayTimer);
-                    delayTimer = null;
-                  }
-                  if (virtualRelayAudio) {
-                    virtualRelayAudio.pause();
-                    virtualRelayAudio.src = "";
-                  }
-                  reportVirtualAudioEvent("stopped", { target, virtual_delay: currentVirtualAudioDelay });
-                }
-              }
-            } else if (msg.type === "status_update") {
-              if (msg.runtime_targets) {
-                runtimeTargets = msg.runtime_targets;
-              }
-              renderDeviceList();
-            }
-          } catch (e) {}
-        };
-
-        wsClient.onclose = () => {
-          wsReconnectTimer = setTimeout(connectWebSocket, 3000);
-        };
-
-        wsClient.onerror = () => {
-          wsClient && wsClient.close();
-        };
-      } catch (e) {
-        wsReconnectTimer = setTimeout(connectWebSocket, 5000);
-      }
-    }
-
-    function reportVirtualAudioEvent(event, details = {}) {
-      if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
-      const payload = {
-        type: "virtual_audio_event",
-        event,
-        client_ts: Date.now(),
-        target: details.target || currentVirtualAudioTarget,
-        virtual_delay: typeof details.virtual_delay === "number" ? details.virtual_delay : currentVirtualAudioDelay
-      };
-      if (details.error) payload.error = String(details.error).slice(0, 300);
-      try {
-        wsClient.send(JSON.stringify(payload));
-      } catch (e) {}
-    }
-
-    // 10 秒应用层定时心跳包，防路由器/防火墙空闲掐断
-    setInterval(() => {
-      if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-        wsClient.send(JSON.stringify({ type: "ping" }));
-      }
-    }, 10000);
-
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        if (!wsClient || wsClient.readyState === WebSocket.CLOSED || wsClient.readyState === WebSocket.CLOSING) {
-          connectWebSocket();
-        }
-        if (virtualRelayAudio && !virtualRelayAudio.paused) {
-          acquireWakeLock();
-        }
-      }
-    });
-
-    function initAudioUnlock() {
-      function unlock() {
-        if (isAudioUnlocked) return;
-        try {
-          const AudioContext = window.AudioContext || window.webkitAudioContext;
-          if (AudioContext) {
-            const ctx = new AudioContext();
-            ctx.resume().then(() => {
-              isAudioUnlocked = true;
-            });
-          }
-          if (!virtualRelayAudio) {
-            virtualRelayAudio = new Audio();
-            virtualRelayAudio.setAttribute("playsinline", "true");
-            virtualRelayAudio.setAttribute("webkit-playsinline", "true");
-            virtualRelayAudio.onplay = () => {
-              reportVirtualAudioEvent("playing");
-              acquireWakeLock();
-              updateMediaSession(true);
-            };
-            virtualRelayAudio.onpause = () => {
-              reportVirtualAudioEvent("paused");
-              releaseWakeLock();
-              updateMediaSession(false);
-            };
-            virtualRelayAudio.onended = () => {
-              reportVirtualAudioEvent("ended");
-              releaseWakeLock();
-              updateMediaSession(false);
-            };
-          }
-          isAudioUnlocked = true;
-        } catch (e) {}
-        window.removeEventListener("touchstart", unlock);
-        window.removeEventListener("pointerdown", unlock);
-        window.removeEventListener("click", unlock);
-        window.removeEventListener("scroll", unlock);
-      }
-
-      window.addEventListener("touchstart", unlock, { passive: true });
-      window.addEventListener("pointerdown", unlock, { passive: true });
-      window.addEventListener("click", unlock, { passive: true });
-      window.addEventListener("scroll", unlock, { passive: true });
-    }
+    let virtualDelay = 2000;
 
     document.addEventListener("DOMContentLoaded", init);
 
@@ -2190,9 +1885,6 @@
     async function init() {
       initDefaultHintHTMLs();
       initTheme();
-      initAudioUnlock();
-      initTabSync();
-      connectWebSocket();
       bindEvents();
 
       const modal = document.getElementById("about_modal");
@@ -2214,9 +1906,9 @@
         lucide.createIcons();
       }
 
-      // 定时每 3 秒轻量同步运行时目标状态 (兜底保障 AirPlay 状态同步)
+      // 定时同步音箱运行状态与在线 Pod 中转设备。
       setInterval(() => {
-        fetchRuntimeTargets();
+        refreshRuntimeStatus();
       }, 3000);
     }
 
@@ -2339,26 +2031,18 @@
 
       if (mode === "normal") {
         tabNormalBtn.classList.add("active");
-        tabNormalBtn.style.background = "#ffffff";
         tabNormalBtn.style.fontWeight = "600";
-        tabNormalBtn.style.boxShadow = "0 1px 3px rgba(0,0,0,0.1)";
 
         tabGroupBtn.classList.remove("active");
-        tabGroupBtn.style.background = "transparent";
         tabGroupBtn.style.fontWeight = "500";
-        tabGroupBtn.style.boxShadow = "none";
 
         subtext.textContent = "勾选启用独立 AirPlay 的音箱";
       } else {
         tabGroupBtn.classList.add("active");
-        tabGroupBtn.style.background = "#ffffff";
         tabGroupBtn.style.fontWeight = "600";
-        tabGroupBtn.style.boxShadow = "0 1px 3px rgba(0,0,0,0.1)";
 
         tabNormalBtn.classList.remove("active");
-        tabNormalBtn.style.background = "transparent";
         tabNormalBtn.style.fontWeight = "500";
-        tabNormalBtn.style.boxShadow = "none";
 
         subtext.textContent = "勾选参与全屋同步播放的音箱（测试版）";
       }
@@ -2373,9 +2057,6 @@
       const data = await parseJsonResponse(response);
       currentSetting = data;
       currentTargets = data.targets || [];
-      if (data.client_ip) {
-        currentClientIp = data.client_ip;
-      }
       if (Array.isArray(data.virtual_speakers)) {
         virtualSpeakers = data.virtual_speakers;
       }
@@ -2428,6 +2109,28 @@
         renderDeviceList();
       }
       return runtimeTargets;
+    }
+
+    async function fetchServiceStatus() {
+      const response = await fetch(withCacheBuster("/api/status"), { cache: "no-store" });
+      const status = await parseJsonResponse(response);
+      if (Array.isArray(status.virtual_speakers)) {
+        virtualSpeakers = status.virtual_speakers;
+      }
+      if (typeof status.virtual_delay === "number") {
+        virtualDelay = status.virtual_delay;
+      }
+      renderStatus(status);
+      renderDeviceList();
+      return status;
+    }
+
+    async function refreshRuntimeStatus() {
+      try {
+        await Promise.all([fetchRuntimeTargets(), fetchServiceStatus()]);
+      } catch (error) {
+        // 后台刷新失败时保留最近一次控制台状态，下一轮继续重试。
+      }
     }
 
     async function waitForServiceReady() {
@@ -2526,6 +2229,7 @@
       const groupSongTitle = groupMetadata.title || "";
       const groupSongArtist = groupMetadata.artist || "";
       const groupPortText = groupRuntime.rtsp_port ? groupRuntime.rtsp_port : "n/a";
+      const groupPortClass = groupRuntime.rtsp_port ? "port-active" : "";
 
       let devicesHtml = "";
       if (realDevices.length) {
@@ -2574,6 +2278,7 @@
         }
 
         const portText = runtime.rtsp_port ? runtime.rtsp_port : "n/a";
+        const portClass = runtime.rtsp_port ? "port-active" : "";
         const dotClass = (isPlaying || isGroupActiveForDevice) ? (isTranscoding ? "transcode" : "direct") : (enabled ? "idle" : "");
         // WiFi 徽章 (硬件原生支持)
         const wifiBadge = (deviceInfo.wifi === "5G")
@@ -2587,7 +2292,7 @@
         return `
           <div class="device-row" data-did="${escapeHtml(did)}">
             <input class="device-check" type="checkbox" data-role="${checkRole}" data-did="${escapeHtml(did)}" ${isChecked ? "checked" : ""}>
-            <div class="device-card${enabled ? " enabled" : ""}">
+            <div class="device-card${isChecked ? " enabled" : ""}">
               <div class="device-main">
                 <div class="device-image" style="background-image:url('${displayImage}'); ${isPlaying && artwork ? 'border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);' : ''}"></div>
                 <div class="device-info">
@@ -2611,7 +2316,7 @@
                     <div class="device-status">
                       ${airplayBadge}
                       ${wifiBadge}
-                      <span class="status-chip ${isPlaying ? 'playing' : ''}">
+                      <span class="status-chip ${isPlaying ? 'playing' : ''} ${portClass}">
                         ${escapeHtml(portText)}
                       </span>
                     </div>
@@ -2626,7 +2331,7 @@
                 <div class="device-status">
                   ${airplayBadge}
                   ${wifiBadge}
-                  <span class="status-chip ${isPlaying ? 'playing' : ''}">
+                  <span class="status-chip ${isPlaying ? 'playing' : ''} ${portClass}">
                     ${escapeHtml(portText)}
                   </span>
                 </div>
@@ -2648,13 +2353,7 @@
       // ============================================================
       // 浏览器虚拟中转节点列表 (MiPlay 中转 · Beta)
       // ============================================================
-      const myDeviceId = getOrCreateDeviceId();
-      const selfSpeaker = {
-        id: myDeviceId,
-        ip: currentClientIp || "127.0.0.1",
-        name: currentClientIp || "127.0.0.1"
-      };
-      const combinedSpeakers = [selfSpeaker, ...(virtualSpeakers || [])];
+      const combinedSpeakers = [...(virtualSpeakers || [])];
       const seenIps = new Set();
       const activeSpeakers = [];
       for (const sp of combinedSpeakers) {
@@ -2669,16 +2368,17 @@
       const relayDot = groupPlaying ? "playing" : "idle";
       const relayStatus = groupPlaying ? (groupSongTitle ? `${escapeHtml(groupSongArtist)} - ${escapeHtml(groupSongTitle)}` : "中转播放中") : "待命";
       const relayPortText = "n/a";
+      const relayArtwork = groupPlaying && groupArtwork ? groupArtwork : "static/icon.png";
 
       const relayHtml = activeSpeakers.map((sp) => {
-        const clientHost = sp.name || sp.ip || currentClientIp || window.location.hostname || "127.0.0.1";
+        const clientHost = sp.name || sp.ip || "未知设备";
 
         return `
           <div class="device-row" data-did="virtual_relay_${escapeHtml(sp.id)}">
             <input class="device-check" type="checkbox" data-role="virtual-relay" ${relayChecked ? "checked" : ""} disabled>
             <div class="device-card enabled">
               <div class="device-main">
-                <div class="device-image" style="background-image:url('static/icon.png'); background-size:contain; background-color:rgba(0,0,0,0.03);"></div>
+                <div class="device-image" style="background-image:url('${escapeHtml(relayArtwork)}'); ${groupPlaying && groupArtwork ? 'border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);' : 'background-size:contain; background-color:rgba(0,0,0,0.03);'}"></div>
                 <div class="device-info">
                   <div class="info-line top">
                     <div class="name-editor" data-role="name-editor">
@@ -2698,7 +2398,7 @@
                     </div>
                     <div class="device-status">
                       <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
-                      <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                      <span class="status-chip">
                         ${escapeHtml(relayPortText)}
                       </span>
                     </div>
@@ -2712,7 +2412,7 @@
                 </div>
                 <div class="device-status">
                   <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
-                  <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                  <span class="status-chip">
                     ${escapeHtml(relayPortText)}
                   </span>
                 </div>
@@ -2769,7 +2469,7 @@
                     </div>
                     <div class="device-status">
                       <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
-                      <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                      <span class="status-chip ${groupPlaying ? 'playing' : ''} ${groupPortClass}">
                         ${escapeHtml(groupPortText)}
                       </span>
                     </div>
@@ -2783,7 +2483,7 @@
                 </div>
                 <div class="device-status">
                   <span class="wifi-badge wifi-5g" title="虚拟音箱"><i data-lucide="radio"></i></span>
-                  <span class="status-chip ${groupPlaying ? 'playing' : ''}">
+                  <span class="status-chip ${groupPlaying ? 'playing' : ''} ${groupPortClass}">
                     ${escapeHtml(groupPortText)}
                   </span>
                 </div>
