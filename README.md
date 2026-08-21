@@ -90,11 +90,11 @@ flowchart TD
 ```yaml
 services:
   miplay:
-    #image: docker.1ms.run/juneix/miplay2 # 毫秒镜像加速 
-    image: ghcr.io/juneix/miplay2:latest
+    #image: docker.1ms.run/juneix/miplay # 毫秒镜像加速 
+    image: ghcr.io/juneix/miplay
     container_name: miplay
     network_mode: host
-    restart: unless-stopped
+    restart: always
     environment:
       WEB_PORT: 8820
     volumes:
@@ -107,16 +107,16 @@ services:
 docker run -d \
   --name miplay \
   --network host \
-  --restart unless-stopped \
+  --restart always \
   -e WEB_PORT=8820 \
   -v "${PWD}/conf:/app/conf" \
-  ghcr.io/juneix/miplay2
-  # docker.1ms.run/juneix/miplay2 # 毫秒镜像加速 
+  ghcr.io/juneix/miplay
+  # docker.1ms.run/juneix/miplay # 毫秒镜像加速 
 ```
 
 ### 3、飞牛应用
 
-飞牛商店的【AirPlay 2 - 隔空播放】已经整合 MiPlay。
+飞牛商店搜索【MiPlay - 隔空妙播】即可在线安装。
 
 ![miplay-3.webp](./img/miplay-3.webp)
 
@@ -127,8 +127,8 @@ docker run -d \
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 克隆项目并进入目录
-git clone https://github.com/juneix/MiPlay2.git
-cd MiPlay2
+git clone https://github.com/juneix/MiPlay.git
+cd MiPlay
 
 # 1. 本地直接运行
 uv run miplay
