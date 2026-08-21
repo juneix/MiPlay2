@@ -31,6 +31,15 @@
       --status-idle-bg: rgba(23, 33, 43, 0.06);
       --status-idle-text: #566371;
       --playing-blue: #3b82f6;
+      --font-title: 20px;
+      --font-heading: 15px;
+      --font-body: 13px;
+      --font-support: 12px;
+      --font-caption: 11px;
+      --modal-bg: rgba(255, 252, 247, 0.82);
+      --modal-border: rgba(255, 255, 255, 0.68);
+      --modal-inset-bg: rgba(255, 255, 255, 0.32);
+      --modal-inset-border: rgba(23, 33, 43, 0.09);
     }
 
     :root[data-theme="dark"] {
@@ -53,6 +62,10 @@
       --status-idle-bg: rgba(255, 255, 255, 0.05);
       --status-idle-text: #8b8b96;
       --playing-blue: #60a5fa;
+      --modal-bg: rgba(28, 28, 32, 0.82);
+      --modal-border: rgba(255, 255, 255, 0.14);
+      --modal-inset-bg: rgba(255, 255, 255, 0.04);
+      --modal-inset-border: rgba(255, 255, 255, 0.1);
     }
 
     * {
@@ -221,13 +234,13 @@
 
     .panel h2 {
       margin: 0 0 8px;
-      font-size: 18px;
+      font-size: var(--font-heading);
     }
 
     .panel p {
       margin: 0 0 16px;
       color: var(--muted);
-      font-size: 14px;
+      font-size: var(--font-body);
       line-height: 1.6;
     }
 
@@ -278,7 +291,7 @@
     }
 
     .guide-step {
-      font-size: 12px;
+      font-size: var(--font-support);
       font-weight: 800;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -286,7 +299,7 @@
     }
 
     .guide-text {
-      font-size: 14px;
+      font-size: var(--font-body);
       line-height: 1.6;
       color: var(--muted);
     }
@@ -298,9 +311,9 @@
     }
 
     .field label {
-      font-size: 12px;
+      font-size: var(--font-body);
       font-weight: 700;
-      letter-spacing: 0.08em;
+      letter-spacing: 0;
       color: var(--muted);
     }
 
@@ -309,7 +322,7 @@
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 12px 14px;
-      font-size: 14px;
+      font-size: var(--font-body);
       background: var(--input-bg);
       color: var(--ink);
       transition: background 0.2s ease, border-color 0.2s ease;
@@ -446,7 +459,7 @@
       border: 0;
       border-radius: 999px;
       padding: 11px 16px;
-      font-size: 13px;
+      font-size: var(--font-body);
       font-weight: 700;
       cursor: pointer;
       transition: transform 0.15s ease, opacity 0.15s ease, background 0.2s ease;
@@ -487,7 +500,7 @@
 
     .hint {
       margin: 0;
-      font-size: 13px;
+      font-size: var(--font-body);
       color: var(--muted);
     }
 
@@ -518,7 +531,7 @@
       color: var(--good);
       padding: 0 14px;
       border-radius: 999px;
-      font-size: 12px;
+      font-size: var(--font-support);
       font-weight: 700;
       line-height: 1;
       white-space: nowrap;
@@ -577,7 +590,7 @@
       gap: 10px;
       padding: 10px 14px;
       border-radius: 10px;
-      font-size: 12px;
+      font-size: var(--font-support);
       line-height: 1.5;
       margin-top: 12px;
       margin-bottom: 8px;
@@ -878,6 +891,7 @@
     }
 
     .tab-btn {
+      background: transparent;
       color: var(--muted);
     }
 
@@ -1075,15 +1089,17 @@
     }
 
     .modal-box {
-      background: var(--bg);
-      border: 1px solid var(--line);
-      border-radius: 32px;
+      background: var(--modal-bg);
+      border: 1px solid var(--modal-border);
+      border-radius: var(--radius);
       width: calc(100vw - 2rem);
       max-width: 440px;
       max-height: 90vh;
       padding: 0;
       position: relative;
       box-shadow: 0 40px 100px rgba(0, 0, 0, 0.15);
+      backdrop-filter: blur(24px) saturate(1.08);
+      -webkit-backdrop-filter: blur(24px) saturate(1.08);
       overflow: hidden;
       color: var(--ink);
       animation: modalFadeIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -1092,8 +1108,8 @@
     }
 
     [data-theme="dark"] .modal-box {
-      background: #1c1c1e;
-      border-color: rgba(255, 255, 255, 0.1);
+      background: var(--modal-bg);
+      border-color: var(--modal-border);
       box-shadow: 0 40px 100px rgba(0, 0, 0, 0.6);
     }
 
@@ -1153,8 +1169,8 @@
       color: var(--muted);
       background: var(--line);
       border: none;
-      width: 44px;
-      height: 44px;
+      width: 36px;
+      height: 36px;
       border-radius: 50%;
       display: flex;
       align-items: center;
@@ -1164,9 +1180,9 @@
     }
 
     .modal-close i {
-      width: 24px;
-      height: 24px;
-      stroke-width: 3;
+      width: 20px;
+      height: 20px;
+      stroke-width: 2.5;
     }
 
     .modal-close:hover {
@@ -1211,9 +1227,9 @@
 
     .panel-head h2 {
       margin: 0;
-      font-size: 19px;
+      font-size: var(--font-heading);
       font-weight: 700;
-      letter-spacing: -0.02em;
+      letter-spacing: 0;
       display: inline-flex;
       align-items: center;
       gap: 8px;
@@ -1231,20 +1247,20 @@
 
     .modal-title-group h3 {
       margin: 0;
-      font-size: 20px;
+      font-size: var(--font-title);
       font-weight: 700;
-      letter-spacing: -0.01em;
+      letter-spacing: 0;
     }
 
     .modal-title-group p {
       margin: 4px 0 0;
-      font-size: 12px;
+      font-size: var(--font-caption);
       color: var(--muted);
       opacity: 0.8;
     }
 
     .modal-intro {
-      font-size: 14px;
+      font-size: var(--font-body);
       line-height: 1.6;
       color: var(--ink);
       opacity: 0.7;
@@ -1263,7 +1279,7 @@
       color: var(--warn);
       padding: 12px 16px;
       border-radius: 12px;
-      font-size: 11px;
+      font-size: var(--font-caption);
       display: flex;
       align-items: center;
       gap: 8px;
@@ -1271,13 +1287,30 @@
     }
 
     .modal-section-title {
-      font-size: 12px;
+      font-size: var(--font-heading);
       font-weight: 700;
       color: var(--muted);
       margin-bottom: 12px;
       display: flex;
       align-items: center;
       gap: 8px;
+    }
+
+    .modal-section-description {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: var(--font-body);
+      line-height: 1.5;
+    }
+
+    .modal-version-badge {
+      padding: 2px 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      border-radius: 999px;
+      font-size: var(--font-caption);
+      font-weight: 700;
     }
 
     .modal-grid {
@@ -1292,13 +1325,18 @@
       justify-content: center;
       gap: 8px;
       padding: 12px;
-      border-radius: 16px;
-      font-size: 11px;
+      border-radius: 8px;
+      font-size: var(--font-body);
       font-weight: 600;
       text-decoration: none;
       transition: all 0.2s ease;
       background: var(--panel);
       border: 1px solid var(--line);
+    }
+
+    .modal-btn:hover {
+      filter: brightness(1.04);
+      transform: translateY(-1px);
     }
 
     .modal-btn:active {
@@ -1329,17 +1367,17 @@
     }
 
     .modal-donate {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 28px;
-      padding: 24px;
+      background: var(--modal-inset-bg);
+      border: 1px solid var(--modal-inset-border);
+      border-radius: 16px;
+      padding: 20px;
       margin-top: 24px;
       text-align: center;
-      box-shadow: var(--shadow);
+      box-shadow: none;
     }
 
     .modal-donate p {
-      font-size: 11px;
+      font-size: var(--font-caption);
       color: var(--muted);
       margin-bottom: 16px;
       font-weight: 500;
@@ -1361,7 +1399,7 @@
     .modal-qr-box img {
       width: 112px;
       height: 112px;
-      border-radius: 20px;
+      border-radius: 8px;
       background: #fff;
       padding: 10px;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
@@ -1380,14 +1418,14 @@
     }
 
     .modal-qr-box span {
-      font-size: 11px;
+      font-size: var(--font-caption);
       color: var(--muted);
     }
 
     .modal-footer {
       margin-top: 40px;
       text-align: center;
-      font-size: 11px;
+      font-size: var(--font-caption);
       color: var(--muted);
       opacity: 0.5;
       padding-bottom: 12px;
@@ -1446,7 +1484,7 @@
         <span>MiPlay</span>
       </h1>
       <div class="subtitle">
-        <p>小米音箱 ✖️ MiPlay（隔空妙播），支持独立 AirPlay 1 设备、全屋播放 Beta、接入 OwnTone 等功能。</p>
+        <p>🎉 MiPlay（隔空妙播）v1.0 重构版正式发布，欢迎多多分享、打赏支持！</p>
       </div>
     </section>
 
@@ -1477,7 +1515,7 @@
         <div class="card-footer-stack" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
           <div class="callout-box default" id="accountHint">
             <i data-lucide="info" class="callout-icon"></i>
-            <span class="callout-text">打开 <a href="https://account.xiaomi.com" target="_blank" rel="noopener noreferrer">小米官网 <i data-lucide="external-link" style="width:12px; height:12px; display:inline-block; vertical-align:middle;"></i></a> ，电脑浏览器按 <code>F12</code> > <code>应用</code> > <code>Cookie</code> 查看；手机使用 <code>Alook</code> 或 <code>Via</code> 浏览器</span>
+            <span class="callout-text">备用：打开 <a href="https://account.xiaomi.com" target="_blank" rel="noopener noreferrer">小米官网 <i data-lucide="external-link" style="width:12px; height:12px; display:inline-block; vertical-align:middle;"></i></a> ，电脑浏览器按 <code>F12</code> > <code>应用</code> > <code>Cookie</code> 查看；手机使用 <code>Alook</code> 或 <code>Via</code> 浏览器</span>
           </div>
           <div class="actions bottom-right" style="display:flex; gap:10px; justify-content:flex-end;">
             <button class="ghost" id="qrLoginBtn" type="button">扫码</button>
@@ -1503,7 +1541,7 @@
           </div>
 
           <div class="input-password-wrapper">
-            <input id="notifyKey" type="password" placeholder="推送 Key 或 URL（可选）">
+            <input id="notifyKey" type="password" placeholder="推送 URL（可选）">
             <button class="toggle-eye-btn" type="button" onclick="togglePasswordVisibility('notifyKey', this)" aria-label="显示/隐藏">
               <i data-lucide="eye"></i>
             </button>
@@ -1513,7 +1551,7 @@
         <div class="card-footer-stack" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
           <div class="callout-box default" id="notifyHint">
             <i data-lucide="info" class="callout-icon"></i>
-            <span class="callout-text">注意是 <code>Server酱³</code>，不是 Server 酱 Turbo；Bark 支持自定义<code>请求参数</code>。</span>
+            <span class="callout-text">注意是 <a href="https://sc3.ft07.com" target="_blank" rel="noopener noreferrer">Server酱³ <i data-lucide="external-link" style="width:12px; height:12px; display:inline-block; vertical-align:middle;"></i></a>，不是 Server 酱 Turbo；<a href="https://bark.day.app" target="_blank" rel="noopener noreferrer">Bark<i data-lucide="external-link" style="width:12px; height:12px; display:inline-block; vertical-align:middle;"></i></a> 支持自定义<code>请求参数</code>。</span>
           </div>
           <div class="actions bottom-right" style="display:flex; gap:10px; justify-content:flex-end;">
             <button class="ghost" id="testNotifyBtn" type="button">测试</button>
@@ -1565,7 +1603,7 @@
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-shrink:0;">
           <div style="display:flex; align-items:center; gap:8px;">
             <i data-lucide="file-text" style="color:var(--accent); width:20px; height:20px;"></i>
-            <h3 style="margin:0; font-size:16px;">运行日志</h3>
+            <h3 style="margin:0; font-size:var(--font-heading);">运行日志</h3>
           </div>
           <div style="display:flex; align-items:center; gap:6px;">
             <button class="modal-close" id="downloadLogsBtn" type="button" title="下载日志文件" style="position:static; margin:0;"><i data-lucide="download"></i></button>
@@ -1575,7 +1613,7 @@
         </div>
 
         <div style="flex:1; min-height:0; display:flex; flex-direction:column; background:#1e1e2e; border-radius:12px; padding:14px; overflow:hidden;">
-          <pre id="logContent" style="flex:1; width:100%; height:100%; background:transparent; color:#a6adc8; font-family:'SFMono-Regular',Consolas,monospace; font-size:12px; line-height:1.5; overflow-y:auto; white-space:pre-wrap; word-break:break-all; margin:0;">正在加载日志…</pre>
+          <pre id="logContent" style="flex:1; width:100%; height:100%; background:transparent; color:#a6adc8; font-family:'SFMono-Regular',Consolas,monospace; font-size:var(--font-support); line-height:1.5; overflow-y:auto; white-space:pre-wrap; word-break:break-all; margin:0;">正在加载日志…</pre>
         </div>
       </div>
     </dialog>
@@ -1588,8 +1626,8 @@
         <div class="modal-inner" style="display:flex; flex-direction:column; align-items:center; width:100%;">
           <div class="modal-header" style="margin-top:10px; margin-bottom:20px; text-align:center; width:100%;">
             <div class="modal-title-group" style="text-align:center; width:100%;">
-              <h3 style="margin:0; font-size:19px; font-weight:700; text-align:center;">扫码登录</h3>
-              <p style="margin-top:8px; font-size:13px; color:var(--muted); text-align:center;">请使用 米家 App 扫描二维码</p>
+              <h3 style="margin:0; font-size:var(--font-title); font-weight:700; text-align:center;">扫码登录</h3>
+              <p style="margin-top:8px; font-size:var(--font-body); color:var(--muted); text-align:center;">请使用 米家 App 扫描二维码</p>
             </div>
           </div>
 
@@ -1617,7 +1655,7 @@
                 <h3>隔空妙播</h3>
                 <span
                   id="appVersionBadge"
-                  style="padding:2px 6px; background:var(--accent-soft); color:var(--accent); font-size:10px; font-weight:800; border-radius:6px; border:1px solid rgba(219,95,40,0.3);">v1.0</span>
+                  class="modal-version-badge">v1.0</span>
               </div>
               <p>让音乐荡漾在每个房间</p>
             </div>
@@ -1633,7 +1671,7 @@
           </div>
 
           <div class="modal-section-title">🚀 交流与支持</div>
-          <p style="font-size:11px; color:var(--muted); margin-bottom:16px;">💬 欢迎转发分享本项目，关注社媒动态、加群催更互动！</p>
+          <p class="modal-section-description">欢迎转发分享本项目，关注社媒动态、加群催更互动！</p>
 
           <div class="modal-grid">
             <a href="https://space.bilibili.com/765334" target="_blank" class="modal-btn bilibili">
@@ -2274,7 +2312,7 @@
             statusText = "正在播放";
           }
         } else {
-          statusText = enabled ? "待命" : "未启用";
+          statusText = enabled ? "等待播放" : "未启用";
         }
 
         const portText = runtime.rtsp_port ? runtime.rtsp_port : "n/a";
@@ -2366,7 +2404,7 @@
 
       const relayChecked = true;
       const relayDot = groupPlaying ? "playing" : "idle";
-      const relayStatus = groupPlaying ? (groupSongTitle ? `${escapeHtml(groupSongArtist)} - ${escapeHtml(groupSongTitle)}` : "中转播放中") : "待命";
+      const relayStatus = groupPlaying ? (groupSongTitle ? `${escapeHtml(groupSongArtist)} - ${escapeHtml(groupSongTitle)}` : "中转播放中") : "等待播放";
       const relayPortText = "n/a";
       const relayArtwork = groupPlaying && groupArtwork ? groupArtwork : "static/icon.png";
 
@@ -2432,7 +2470,7 @@
         const groupDisabled = true;
         const groupDot = groupPlaying ? "playing" : "idle";
 
-        let groupStatus = "待命";
+        let groupStatus = "等待播放";
         if (groupPlaying) {
           if (groupSongTitle) {
             groupStatus = `${escapeHtml(groupSongArtist)} - ${escapeHtml(groupSongTitle)}`;
