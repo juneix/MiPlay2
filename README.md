@@ -121,13 +121,15 @@ docker run -d \
 ![miplay-3.webp](./img/miplay-3.webp)
 
 ### 4、uv 本地运行
-
+> 复制下面的内容，发给你的 AI 助手即可自动安装 MiPlay，支持 x86、arm64 架构设备。
 ```bash
 # 安装 uv 包管理器
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 克隆项目并进入目录
 git clone https://github.com/juneix/MiPlay.git
+# 国内镜像加速
+# git clone https://gh-proxy.org/https://github.com/juneix/MiPlay.git
 cd MiPlay
 
 # 1. 本地直接运行
