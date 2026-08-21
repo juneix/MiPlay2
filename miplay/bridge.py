@@ -90,7 +90,7 @@ class AirPlayBridge:
 
     def _on_play_resume(self):
         if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._resume_target)
+            self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._resume_target()))
 
     @staticmethod
     def _vol_pct_to_db(volume: int) -> float:
@@ -189,8 +189,15 @@ class AirPlayBridge:
         except Exception:
             pass
 
-    def _resume_target(self):
+    async def _resume_target(self):
+        if self.audio_hub:
+            self.audio_hub.start_source("airplay")
         self._airplay_active = True
+        if self._stream_url:
+            try:
+                await self.controller.play_url(self._stream_url, self._session_audio_id)
+            except Exception:
+                log.debug("AirPlay resume failed for %s", self.device_name, exc_info=True)
         self._start_poll()
 
     def _start_poll(self):

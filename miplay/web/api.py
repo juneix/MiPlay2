@@ -158,13 +158,17 @@ def create_web_app(config: Config, app_instance) -> web.Application:
         log.info("[System] Web 虚拟音箱已连接: name=%s ip=%s device=%s online=%d", device_name, client_ip, device_id, len(_ws_sessions))
 
         # 即刻向当前连接客户端单播自身 IP 与在线列表 (零等待即时绑定真实 IP)
+        session = app_instance.audio_hub.get_session()
         await ws.send_json({
             "type": "session_init",
             "client_ip": client_ip,
             "virtual_speakers": get_virtual_speakers(),
             "virtual_delay": config.virtual_delay,
-            "session": app_instance.audio_hub.get_session(),
+            "session": session,
         })
+        # session_init 与封面/进度更新可能并发到达；连接建立后再补发一次
+        # 当前快照，避免刷新时只拿到开播初始的空 artwork。
+        await ws.send_json({"type": "playback_state", "session": app_instance.audio_hub.get_session()})
 
         # 广播最新虚拟音箱在线状态
         await broadcast_ws({

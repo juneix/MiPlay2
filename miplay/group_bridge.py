@@ -174,9 +174,12 @@ class GroupBridge:
             return
         def resume():
             if self.audio_hub:
+                self.audio_hub.start_source("airplay")
                 self.audio_hub.update_session_metadata(state="playing")
             self._airplay_active = True
             self._start_poll()
+            if self._stream_url:
+                asyncio.create_task(self.controller.play_url(self._stream_url, self._session_audio_id))
         self._loop.call_soon_threadsafe(resume)
 
     def _on_metadata_change(self, metadata: dict, artwork: str | None):

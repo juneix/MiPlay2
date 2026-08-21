@@ -690,6 +690,8 @@
       let currentSessionId = 0;
       let currentClientIp = "";
       let currentStreamUrl = "";
+      let audioUnlocked = false;
+      let pendingPlay = null;
       let streamRetryTimer = 0;
       let ws = null;
       let wsRetryTimer = 0;
@@ -1256,6 +1258,7 @@
         audio.removeAttribute("src");
         audio.load();
         currentStreamUrl = "";
+        pendingPlay = null;
         report("stopped");
       }
 
@@ -1266,9 +1269,21 @@
         const resolved = new URL(url, location.origin);
         resolved.searchParams.set("_pod", String(Date.now()));
         currentStreamUrl = resolved.href;
+        pendingPlay = { url: currentStreamUrl, sessionId };
         audio.src = currentStreamUrl;
         report("play_call", { target: "group_all" });
+        if (!audioUnlocked) return;
         audio.play().catch((error) => report("play_error", { error: String(error) }));
+      }
+
+      function unlockAudioFromGesture() {
+        audioUnlocked = true;
+        const attempt = audio.play();
+        if (attempt && attempt.catch) attempt.catch(() => {});
+        if (pendingPlay && currentStreamUrl) {
+          audio.src = pendingPlay.url;
+          audio.play().catch((error) => report("play_error", { error: String(error) }));
+        }
       }
 
       function reconnectStream() {
@@ -1449,9 +1464,9 @@
         $("volumeButton").setAttribute("aria-expanded", "false");
       });
       document.addEventListener("pointerdown", () => {
-        if (isMaster && currentStreamUrl && audio.paused) audio.play().catch(() => {});
+        unlockAudioFromGesture();
         acquireWakeLock();
-      }, { once: true });
+      }, { passive: true });
       document.addEventListener("visibilitychange", () => {
         acquireWakeLock();
         if (!document.hidden && !animationFrame) {
