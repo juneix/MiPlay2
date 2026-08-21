@@ -57,6 +57,8 @@ class AirPlayBridge:
         )
         self.airplay_server.on_play_start = self._on_play_start
         self.airplay_server.on_play_stop = self._on_play_stop
+        self.airplay_server.on_play_pause = self._on_play_pause
+        self.airplay_server.on_play_resume = self._on_play_resume
         self.airplay_server.on_volume_change = self._on_volume_change
         await self.airplay_server.start()
         log.info("Started AirPlay bridge %s on rtsp=%s", self.device_name, self.airplay_server.rtsp_port)
@@ -81,6 +83,14 @@ class AirPlayBridge:
     def _on_play_stop(self):
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._stop_target(), self._loop)
+
+    def _on_play_pause(self):
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._pause_target(), self._loop)
+
+    def _on_play_resume(self):
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._resume_target)
 
     @staticmethod
     def _vol_pct_to_db(volume: int) -> float:
@@ -164,6 +174,24 @@ class AirPlayBridge:
             await self.controller.stop()
         except Exception:
             pass
+
+    async def _pause_target(self):
+        self._airplay_active = False
+        if self._poll_task:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+        try:
+            await self.controller.pause()
+        except Exception:
+            pass
+
+    def _resume_target(self):
+        self._airplay_active = True
+        self._start_poll()
 
     def _start_poll(self):
         if self._poll_task and not self._poll_task.done():

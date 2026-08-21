@@ -33,9 +33,9 @@
       /* ID3 跑马灯、工具内容和播放进度共享的左右对齐宽度。 */
       --media-content-width: 520px;
       /* 音量轨道宽度：从信息区左边界对齐到音量图标前的按钮间距。 */
-      --utility-track-width: 368px;
-      /* 音量轨道右端到音量按钮左端的间距，必须等于工具按钮 gap。 */
-      --utility-track-right-gap: 76px;
+      --utility-track-width: calc(var(--media-content-width) - 2 * var(--utility-button-size) - 2 * var(--toolbar-gap));
+      /* 音量轨道到音量按钮、音量按钮到全屏按钮共用此间距。 */
+      --toolbar-gap: 24px;
       /* 播放控制组宽度。 */
       --transport-width: 480px;
       /* 横屏信息区的轻微纵向校正；四个分区仍保持等高。 */
@@ -106,25 +106,13 @@
     button,
     input { font: inherit; }
 
-    #fluid,
-    .backdrop-shade {
+    #fluid {
       position: fixed;
       inset: 0;
       width: 100%;
       height: 100%;
       pointer-events: none;
-    }
-
-    #fluid {
-      filter: blur(65px);
-      opacity: .62;
-      transform: scale(1.08);
-    }
-
-    .backdrop-shade {
-      background:
-        radial-gradient(circle at 50% 45%, transparent 0 25%, rgba(0, 0, 0, .16) 68%, rgba(0, 0, 0, .48) 100%),
-        linear-gradient(rgba(3, 4, 8, .26), rgba(3, 4, 8, .48));
+      opacity: .88;
     }
 
     .layout {
@@ -137,7 +125,7 @@
       align-items: center;
       justify-content: center;
       gap: var(--layout-gap);
-      overflow: hidden;
+      overflow: visible;
     }
 
     .stage {
@@ -148,6 +136,15 @@
       min-width: 0;
       min-height: 0;
       overflow: hidden;
+    }
+
+    .art-stage {
+      overflow: visible;
+      z-index: 2;
+    }
+
+    .info-stage {
+      z-index: 1;
     }
 
     .design {
@@ -169,37 +166,79 @@
       position: relative;
       width: var(--content-size);
       height: var(--content-size);
-      overflow: hidden;
+      overflow: visible;
       border-radius: 28px;
       background: transparent;
-      perspective: 1000px;
+      perspective: 1800px;
+    }
+
+    /* 这里只是封面区域的高斯阴影底，不参与封面翻转，也不覆盖面片。 */
+    .artwork-shell::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      border-radius: 28px;
+      background: rgba(0, 0, 0, .26);
+      filter: blur(28px);
+      transform: scale(.96);
+      pointer-events: none;
     }
 
     .artwork-media {
       position: absolute;
       left: 50%;
       top: 50%;
-      width: var(--artwork-width, var(--content-size));
-      height: var(--artwork-height, var(--content-size));
-      transform: translate(-50%, -50%);
+      width: var(--front-artwork-width, var(--content-size));
+      height: var(--front-artwork-height, var(--content-size));
+      transform: rotateY(0deg);
+      translate: -50% -50%;
+      transform-origin: center;
+      transform-style: preserve-3d;
+      z-index: 10;
+    }
+
+    .artwork-face {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: var(--face-width, var(--content-size));
+      height: var(--face-height, var(--content-size));
       overflow: hidden;
       border-radius: 28px;
-      transform-origin: center;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+    }
+
+    .artwork-face.front {
+      --face-width: var(--front-artwork-width, var(--content-size));
+      --face-height: var(--front-artwork-height, var(--content-size));
+      transform: translate(-50%, -50%) rotateY(0deg);
+    }
+
+    .artwork-face.back {
+      --face-width: var(--back-artwork-width, var(--content-size));
+      --face-height: var(--back-artwork-height, var(--content-size));
+      transform: translate(-50%, -50%) rotateY(180deg);
     }
 
     .artwork {
       display: block;
+      position: relative;
+      z-index: 3;
       width: 100%;
       height: 100%;
       object-fit: cover;
       object-position: center;
+      opacity: 0;
     }
 
-    .artwork-media.artwork-switch { animation: artwork-flip .8s cubic-bezier(.22, .75, .2, 1) both; }
+    .artwork.ready { opacity: 1; }
+
+    .artwork-media.artwork-switch { animation: artwork-flip .8s cubic-bezier(.45, .05, .55, .95) both; }
     @keyframes artwork-flip {
-      0% { transform: translate(-50%, -50%) rotateY(0deg); }
-      48% { transform: translate(-50%, -50%) rotateY(90deg); }
-      100% { transform: translate(-50%, -50%) rotateY(0deg); }
+      from { transform: rotateY(0deg) translateZ(0); }
+      to { transform: rotateY(-180deg) translateZ(0); }
     }
 
     .artwork-fallback {
@@ -214,7 +253,7 @@
       color: rgba(255, 255, 255, .32);
       background: transparent;
       overflow: hidden;
-      z-index: 2;
+      z-index: 1;
     }
 
     /* 必须显式覆盖 display:grid，否则 hidden 属性可能无法隐藏默认 poster。 */
@@ -223,7 +262,7 @@
     .artwork-fallback svg { width: 168px; height: 168px; stroke-width: 1.25; }
 
     .artwork-fallback.poster-error {
-      border: 2px solid rgba(255, 255, 255, .2);
+      border: 0;
     }
 
     .artwork-fallback:not(.poster-error) svg { display: none; }
@@ -275,6 +314,7 @@
     }
 
     .toolbar-inner {
+      position: relative;
       width: var(--media-content-width);
       /* 工具栏自身高度；只影响按钮垂直点击区，不影响分区高度。 */
       height: var(--utility-button-size);
@@ -282,7 +322,7 @@
       align-items: center;
       justify-content: flex-end;
       /* 音量按钮与全屏按钮之间的水平间距。 */
-      gap: 24px;
+      gap: var(--toolbar-gap);
     }
 
     .icon-button {
@@ -303,7 +343,7 @@
     .icon-button:disabled { color: var(--disabled); cursor: default; }
 
     .volume-wrap {
-      position: relative;
+      position: static;
       flex: 0 0 var(--utility-button-size);
       width: var(--utility-button-size);
       height: var(--utility-button-size);
@@ -312,7 +352,8 @@
     .volume-pop {
       position: absolute;
       /* 音量轨道右端与音量按钮左端保持与工具按钮相同的 24px 视觉间距。 */
-      right: var(--utility-track-right-gap);
+      left: 0;
+      right: auto;
       top: 0;
       z-index: 4;
       /* 展开后音量轨道宽度；左端与进度轨道严格对齐。 */
@@ -537,7 +578,7 @@
 
       .volume-pop {
         top: 0;
-        right: var(--utility-track-right-gap);
+        left: 0;
       }
 
       .copy,
@@ -547,7 +588,6 @@
     }
 
     @media (prefers-reduced-motion: reduce) {
-      #fluid { filter: blur(72px); }
       .artwork-media { animation: none !important; }
       .artwork-fallback { transition: none; }
     }
@@ -555,18 +595,25 @@
 </head>
 <body>
   <canvas id="fluid" aria-hidden="true"></canvas>
-  <div class="backdrop-shade" aria-hidden="true"></div>
-
   <main class="layout" aria-label="MiPlay 虚拟音箱">
     <section class="stage art-stage" aria-label="专辑封面">
       <div class="design art-design">
         <div class="artwork-shell">
           <div class="artwork-media" id="artworkMedia">
-            <div class="artwork-fallback" id="artworkFallback">
-              <img class="fallback-poster" id="fallbackPoster" src="/static/poster.png" alt="">
-              <i data-lucide="music-4"></i>
+            <div class="artwork-face front">
+              <div class="artwork-fallback" id="artworkFallback">
+                <img class="fallback-poster" id="fallbackPoster" src="/static/poster.png" alt="">
+                <i data-lucide="music-4"></i>
+              </div>
+              <img class="artwork" id="artwork" alt="">
             </div>
-            <img class="artwork" id="artwork" alt="">
+            <div class="artwork-face back">
+              <div class="artwork-fallback" id="nextArtworkFallback" hidden>
+                <img class="fallback-poster" id="nextFallbackPoster" src="/static/poster.png" alt="">
+                <i data-lucide="music-4"></i>
+              </div>
+              <img class="artwork" id="nextArtwork" alt="">
+            </div>
           </div>
         </div>
       </div>
@@ -633,6 +680,7 @@
       const STORAGE_VOLUME = "miplay_pod_volume";
       const STORAGE_MUTED_VOLUME = "miplay_pod_unmuted_volume";
       const CHANNEL_NAME = "miplay_pod_master";
+      const STORAGE_BACKGROUND_QUALITY = "miplay_pod_background_quality";
       const FALLBACK_COLORS = ["#10131d", "#283452", "#5c365e", "#b85c63"];
       const $ = (id) => document.getElementById(id);
       const audio = new Audio();
@@ -649,13 +697,21 @@
       let pingTimer = 0;
       let wakeLock = null;
       let palette = FALLBACK_COLORS.slice();
+      let targetPalette = FALLBACK_COLORS.slice();
       let paletteArtwork = "";
       let artworkFallbackTimer = 0;
       let artworkRequestId = 0;
       let pendingArtworkSource = "";
       let awaitingArtworkTrackKey = "";
       let currentTrackKey = "";
+      let pendingArtworkFlip = null;
+      let lastSongMetadata = {};
+      let lastSongProgress = null;
       let animationFrame = 0;
+      let backgroundQuality = "high";
+      let backgroundFrameInterval = 1000 / 60;
+      let backgroundLastFrame = 0;
+      let backgroundSlowFrames = 0;
       let isMaster = !window.BroadcastChannel;
       const tabId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       let channel = null;
@@ -667,6 +723,28 @@
 
       function clamp(value, min, max) {
         return Math.min(max, Math.max(min, value));
+      }
+
+      function detectBackgroundQuality() {
+        const requested = new URLSearchParams(location.search).get("background");
+        if (["high", "low"].includes(requested)) {
+          localStorage.setItem(STORAGE_BACKGROUND_QUALITY, requested);
+          return requested;
+        }
+        const saved = localStorage.getItem(STORAGE_BACKGROUND_QUALITY);
+        if (["high", "low"].includes(saved)) return saved;
+        const ua = navigator.userAgent;
+        const androidChrome = ua.match(/Android.*Chrome\/(\d+)/i);
+        const oldAndroidChrome = androidChrome && Number(androidChrome[1]) <= 119;
+        const lowMemory = navigator.deviceMemory && navigator.deviceMemory <= 2;
+        const lowCpu = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
+        return oldAndroidChrome || lowMemory || lowCpu ? "low" : "high";
+      }
+
+      function configureBackgroundQuality(quality) {
+        backgroundQuality = quality === "low" ? "low" : "high";
+        backgroundFrameInterval = 1000 / (backgroundQuality === "high" ? 60 : 24);
+        resizeBackground();
       }
 
       function resizeLayout() {
@@ -703,16 +781,15 @@
         root.setProperty("--content-size", `${contentSize}px`);
         root.setProperty("--zone-height", `${contentSize / 4}px`);
         root.setProperty("--media-content-width", `${Math.round(520 * contentRatio)}px`);
-        root.setProperty("--utility-track-width", `${Math.round(368 * contentRatio)}px`);
         root.setProperty("--transport-width", `${Math.round(480 * contentRatio)}px`);
         resizeBackground();
       }
 
       function resizeBackground() {
         const canvas = $("fluid");
-        const ratio = Math.min(window.devicePixelRatio || 1, 2);
-        const width = Math.max(1, Math.round(innerWidth * ratio));
-        const height = Math.max(1, Math.round(innerHeight * ratio));
+        const scale = backgroundQuality === "high" ? .5 : .28;
+        const width = Math.max(1, Math.round(innerWidth * scale));
+        const height = Math.max(1, Math.round(innerHeight * scale));
         if (canvas.width !== width || canvas.height !== height) {
           canvas.width = width;
           canvas.height = height;
@@ -720,32 +797,58 @@
       }
 
       function drawBackground(time) {
+        if (document.hidden) {
+          animationFrame = 0;
+          return;
+        }
+        animationFrame = requestAnimationFrame(drawBackground);
+        const elapsed = time - backgroundLastFrame;
+        if (elapsed < backgroundFrameInterval) return;
+        backgroundLastFrame = time - (elapsed % backgroundFrameInterval);
+        if (backgroundQuality === "high") {
+          backgroundSlowFrames = elapsed > 42 ? backgroundSlowFrames + 1 : Math.max(0, backgroundSlowFrames - 1);
+          if (backgroundSlowFrames > 45) {
+            configureBackgroundQuality("low");
+            backgroundSlowFrames = 0;
+          }
+        }
         const canvas = $("fluid");
         const context = canvas.getContext("2d");
         if (!context) return;
         const width = canvas.width;
         const height = canvas.height;
-        context.clearRect(0, 0, width, height);
+        palette = palette.map((color, index) => mixHex(color, targetPalette[index] || targetPalette[0], .045));
         context.fillStyle = palette[0];
         context.fillRect(0, 0, width, height);
-        const t = time * .000075;
-        const points = [
-          [.20 + Math.sin(t) * .08, .25 + Math.cos(t * 1.2) * .10, .62],
-          [.76 + Math.cos(t * .8) * .10, .22 + Math.sin(t * 1.1) * .09, .58],
-          [.30 + Math.cos(t * 1.3) * .12, .78 + Math.sin(t * .9) * .08, .66],
-          [.77 + Math.sin(t * 1.05) * .09, .73 + Math.cos(t * .75) * .10, .55]
+        const t = time * (backgroundQuality === "high" ? .00045 : .00028);
+        const points = backgroundQuality === "high" ? [
+          [.18 + Math.sin(t) * .18, .20 + Math.cos(t * 1.2) * .16, .58],
+          [.82 + Math.cos(t * .8) * .18, .22 + Math.sin(t * 1.1) * .15, .62],
+          [.25 + Math.cos(t * 1.3) * .20, .82 + Math.sin(t * .9) * .14, .64],
+          [.80 + Math.sin(t * 1.05) * .17, .76 + Math.cos(t * .75) * .16, .56]
+        ] : [
+          [.22 + Math.sin(t) * .10, .25 + Math.cos(t) * .08, .74],
+          [.78 + Math.cos(t * .8) * .10, .70 + Math.sin(t) * .08, .76],
+          [.50 + Math.sin(t * .65) * .08, .48 + Math.cos(t * .7) * .07, .68]
         ];
         points.forEach((point, index) => {
           const x = point[0] * width;
           const y = point[1] * height;
           const radius = Math.max(width, height) * point[2];
           const gradient = context.createRadialGradient(x, y, 0, x, y, radius);
-          gradient.addColorStop(0, palette[index] + "e0");
+          gradient.addColorStop(0, (palette[index] || palette[0]) + (backgroundQuality === "high" ? "e8" : "d0"));
+          gradient.addColorStop(.68, (palette[index] || palette[0]) + "70");
           gradient.addColorStop(1, palette[index] + "00");
           context.fillStyle = gradient;
-          context.fillRect(0, 0, width, height);
+          context.beginPath();
+          context.arc(x, y, radius, 0, Math.PI * 2);
+          context.fill();
         });
-        animationFrame = requestAnimationFrame(drawBackground);
+        const shade = context.createRadialGradient(width * .5, height * .42, 0, width * .5, height * .42, Math.max(width, height) * .78);
+        shade.addColorStop(0, "rgba(0,0,0,0)");
+        shade.addColorStop(1, "rgba(0,0,0,.42)");
+        context.fillStyle = shade;
+        context.fillRect(0, 0, width, height);
       }
 
       function colorDistance(a, b) {
@@ -754,6 +857,17 @@
 
       function rgbToHex(rgb) {
         return "#" + rgb.map((value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0")).join("");
+      }
+
+      function hexToRgb(color) {
+        const value = color.replace("#", "");
+        return [0, 2, 4].map((offset) => parseInt(value.slice(offset, offset + 2), 16));
+      }
+
+      function mixHex(from, to, amount) {
+        const a = hexToRgb(from);
+        const b = hexToRgb(to);
+        return rgbToHex(a.map((value, index) => value + (b[index] - value) * amount));
       }
 
       function extractPalette(image, source) {
@@ -784,26 +898,107 @@
             if (selected.length === 4) break;
           }
           while (selected.length < 4) selected.push(candidates[Math.floor(candidates.length * selected.length / 4)].rgb);
-          palette = selected.map(rgbToHex);
+          const extracted = selected.map(rgbToHex);
+          targetPalette = backgroundQuality === "high" ? extracted : extracted.slice(0, 3);
         } catch (_) {
-          palette = FALLBACK_COLORS.slice();
+          targetPalette = FALLBACK_COLORS.slice();
         }
       }
 
-      function showFallbackArtwork() {
-        const image = $("artwork");
+      function artworkFace(next = false) {
+        return {
+          image: $(next ? "nextArtwork" : "artwork"),
+          fallback: $(next ? "nextArtworkFallback" : "artworkFallback"),
+          widthProperty: next ? "--back-artwork-width" : "--front-artwork-width",
+          heightProperty: next ? "--back-artwork-height" : "--front-artwork-height"
+        };
+      }
+
+      function setFaceDimensions(next, width, height) {
+        const face = artworkFace(next);
         const media = $("artworkMedia");
-        const fallback = $("artworkFallback");
-        fallback.hidden = false;
-        image.removeAttribute("src");
-        image.dataset.source = "";
-        image.classList.remove("ready");
-        media.style.removeProperty("--artwork-width");
-        media.style.removeProperty("--artwork-height");
+        media.style.setProperty(face.widthProperty, `${width}px`);
+        media.style.setProperty(face.heightProperty, `${height}px`);
+        if (!next) {
+          media.style.width = `${width}px`;
+          media.style.height = `${height}px`;
+        }
+      }
+
+      function clearFace(next) {
+        const face = artworkFace(next);
+        face.image.removeAttribute("src");
+        face.image.dataset.source = "";
+        face.image.classList.remove("ready");
+        face.fallback.hidden = true;
+        face.fallback.classList.remove("poster-error");
+      }
+
+      function applyFaceState(next, state) {
+        const face = artworkFace(next);
+        setFaceDimensions(next, state.width, state.height);
+        if (state.source) {
+          face.image.src = state.source;
+          face.image.dataset.source = state.source;
+          face.image.classList.add("ready");
+          face.fallback.hidden = true;
+        } else {
+          face.image.removeAttribute("src");
+          face.image.dataset.source = "";
+          face.image.classList.remove("ready");
+          const poster = face.fallback.querySelector(".fallback-poster");
+          face.fallback.classList.toggle("poster-error", Boolean(poster && poster.hidden));
+          face.fallback.hidden = false;
+        }
+      }
+
+      function cancelArtworkFlip() {
+        const media = $("artworkMedia");
+        media.classList.remove("artwork-switch");
+        pendingArtworkFlip = null;
+        clearFace(true);
+      }
+
+      function commitArtworkState(state) {
+        applyFaceState(false, state);
+        clearFace(true);
+        if (state.source && state.paletteImage) {
+          extractPalette(state.paletteImage, state.source);
+        } else if (!state.source) {
+          paletteArtwork = "";
+          targetPalette = FALLBACK_COLORS.slice();
+        }
+      }
+
+      function transitionArtwork(state, requestId) {
+        const media = $("artworkMedia");
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          commitArtworkState(state);
+          return;
+        }
+        applyFaceState(true, state);
+        pendingArtworkFlip = { requestId, state };
+        media.classList.remove("artwork-switch");
+        void media.offsetWidth;
+        media.classList.add("artwork-switch");
+      }
+
+      function showFallbackArtwork() {
+        cancelArtworkFlip();
         pendingArtworkSource = "";
-        fallback.classList.remove("poster-error");
-        paletteArtwork = "";
-        palette = FALLBACK_COLORS.slice();
+        const size = safeNumber(parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--content-size")), 608);
+        commitArtworkState({ source: "", width: size, height: size });
+      }
+
+      function hideArtwork() {
+        cancelArtworkFlip();
+        const face = artworkFace(false);
+        face.image.removeAttribute("src");
+        face.image.dataset.source = "";
+        face.image.classList.remove("ready");
+        face.fallback.hidden = true;
+          paletteArtwork = "";
+          targetPalette = FALLBACK_COLORS.slice();
       }
 
       function imageHasArtwork() {
@@ -813,28 +1008,28 @@
 
       function setArtwork(source, keepPreviousBriefly = false) {
         const image = $("artwork");
-        const fallback = $("artworkFallback");
-        const media = $("artworkMedia");
+        if (source && (
+          image.dataset.source === source ||
+          pendingArtworkSource === source ||
+          (pendingArtworkFlip && pendingArtworkFlip.state.source === source)
+        )) return;
         clearTimeout(artworkFallbackTimer);
+        cancelArtworkFlip();
         if (!source) {
           pendingArtworkSource = "";
           const requestId = ++artworkRequestId;
-          if (keepPreviousBriefly && image.classList.contains("ready")) {
+          if (keepPreviousBriefly && imageHasArtwork()) {
             artworkFallbackTimer = window.setTimeout(() => {
-              if (requestId !== artworkRequestId) return;
-              media.classList.remove("artwork-switch");
-              void media.offsetWidth;
-              media.classList.add("artwork-switch");
-              window.setTimeout(() => {
-                if (requestId === artworkRequestId) showFallbackArtwork();
-              }, 400);
-            }, 600);
+              if (requestId === artworkRequestId) hideArtwork();
+            }, 1200);
+          } else if (keepPreviousBriefly) {
+            hideArtwork();
           } else {
+            /* 默认 poster 只属于 stopped/idle 空状态。 */
             showFallbackArtwork();
           }
           return;
         }
-        if (image.dataset.source === source || pendingArtworkSource === source) return;
         const requestId = ++artworkRequestId;
         pendingArtworkSource = source;
         /* 先用临时图片预加载，旧封面在新封面成功前始终留在画面上。 */
@@ -847,35 +1042,30 @@
           const maxSize = safeNumber(parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--content-size")), 608);
           const width = ratio >= 1 ? maxSize : Math.max(1, Math.round(maxSize * ratio));
           const height = ratio >= 1 ? Math.max(1, Math.round(maxSize / ratio)) : maxSize;
-          const commitArtwork = () => {
-            if (requestId !== artworkRequestId) return;
-            pendingArtworkSource = "";
-            media.style.setProperty("--artwork-width", `${width}px`);
-            media.style.setProperty("--artwork-height", `${height}px`);
-            image.src = source;
-            image.dataset.source = source;
-            image.classList.add("ready");
-            extractPalette(pending, source);
-            fallback.hidden = true;
-          };
+          const state = { source, width, height, paletteImage: pending };
+          pendingArtworkSource = "";
           if (hadArtwork) {
-            media.classList.remove("artwork-switch");
-            void media.offsetWidth;
-            media.classList.add("artwork-switch");
-            window.setTimeout(commitArtwork, 400);
-            window.setTimeout(() => media.classList.remove("artwork-switch"), 820);
+            transitionArtwork(state, requestId);
           } else {
-            commitArtwork();
+            commitArtworkState(state);
           }
         };
         pending.onerror = () => {
           if (requestId !== artworkRequestId) return;
           pendingArtworkSource = "";
-          if (!hadArtwork) fallback.hidden = false;
-          fallback.classList.remove("poster-error");
+          if (!hadArtwork) showFallbackArtwork();
         };
         pending.src = source;
       }
+
+      $("artworkMedia").addEventListener("animationend", (event) => {
+        if (event.animationName !== "artwork-flip") return;
+        const media = event.currentTarget;
+        const flip = pendingArtworkFlip;
+        if (flip && flip.requestId === artworkRequestId) commitArtworkState(flip.state);
+        pendingArtworkFlip = null;
+        media.classList.remove("artwork-switch");
+      });
 
       function updateMarquee(contentId, viewportId) {
         const content = $(contentId);
@@ -942,9 +1132,9 @@
       }
 
       function renderProgress() {
-        const progress = currentSession && currentSession.progress;
-        const duration = safeNumber(progress && progress.duration_ms);
         const active = currentSession && (currentSession.state === "playing" || currentSession.state === "paused");
+        const progress = active ? (currentSession.progress || lastSongProgress) : null;
+        const duration = safeNumber(progress && progress.duration_ms);
         const visible = active && duration > 0;
         $("progressBlock").classList.toggle("visible", visible);
         if (!visible) {
@@ -954,7 +1144,8 @@
           $("durationTime").textContent = "--:--";
           return;
         }
-        const position = progressPosition(currentSession);
+        const progressSession = currentSession.progress ? currentSession : { ...currentSession, progress };
+        const position = progressPosition(progressSession);
         $("progressFill").classList.toggle("empty", position <= 0);
         $("progressFill").style.width = `${clamp(position / duration * 100, 0, 100)}%`;
         $("currentTime").textContent = formatTime(position);
@@ -966,14 +1157,26 @@
         const incomingId = safeNumber(session.session_id);
         if (incomingId && incomingId < currentSessionId) return;
         currentSessionId = Math.max(currentSessionId, incomingId);
-        currentSession = session;
         const playing = session.state === "playing" || session.state === "paused";
-        const metadata = session.metadata || {};
+        if (!playing) {
+          lastSongMetadata = {};
+          lastSongProgress = null;
+        } else if (session.progress) {
+          lastSongProgress = session.progress;
+        }
+        const incomingMetadata = session.metadata || {};
+        const metadata = playing ? { ...lastSongMetadata, ...incomingMetadata } : {};
+        // 状态广播可能先后到达“无 artwork 的基础 session”和“带 artwork
+        // 的元数据 session”。同一曲目下不能让空值覆盖已经收到的封面。
+        if (playing && lastSongMetadata.artwork && !incomingMetadata.artwork) {
+          metadata.artwork = lastSongMetadata.artwork;
+        }
+        if (playing) lastSongMetadata = metadata;
+        currentSession = { ...session, metadata, progress: session.progress || (playing ? lastSongProgress : null) };
         const hasSong = playing && Boolean(metadata.title || metadata.artist || metadata.album || metadata.artwork);
         const artist = hasSong && metadata.artist ? metadata.artist : "";
         const album = hasSong && metadata.album ? metadata.album : "";
         const trackKey = hasSong ? `${metadata.title || ""}\u0000${artist}\u0000${album}` : "";
-        const trackChanged = Boolean(currentTrackKey && trackKey && trackKey !== currentTrackKey);
         currentTrackKey = trackKey;
         setMarqueeText("trackTitle", hasSong && metadata.title ? metadata.title : "MiPlay 全屋播放");
         setMarqueeText("trackArtist", hasSong ? (artist || "等待播放") : "等待播放");
@@ -986,11 +1189,9 @@
         } else if (metadata.artwork) {
           awaitingArtworkTrackKey = "";
           setArtwork(metadata.artwork);
-        } else if (trackChanged) {
+        } else if (awaitingArtworkTrackKey !== trackKey) {
           awaitingArtworkTrackKey = trackKey;
           setArtwork("", true);
-        } else if (awaitingArtworkTrackKey !== trackKey && !imageHasArtwork()) {
-          setArtwork("");
         }
 
         const capabilities = session.capabilities || {};
@@ -1001,7 +1202,7 @@
         $("playPauseButton").setAttribute("aria-label", session.state === "playing" ? "暂停" : "播放");
         refreshIcons();
         renderProgress();
-        updateMediaSession(session);
+        updateMediaSession(currentSession);
       }
 
       async function sendSessionControl(action) {
@@ -1094,7 +1295,13 @@
         if (!targetMatches(message.target)) return;
         report("command_received", { target: message.target || "group_all" });
         if (message.action === "play_url" && message.url) playStream(message.url, sessionId);
-        if (["stop", "pause"].includes(message.action)) stopAudio();
+        if (message.action === "stop") {
+          stopAudio();
+        } else if (message.action === "pause") {
+          clearTimeout(streamRetryTimer);
+          audio.pause();
+          report("paused");
+        }
       }
 
       function connectWebSocket() {
@@ -1231,7 +1438,11 @@
         $("volumeButton").setAttribute("aria-expanded", String(open));
       });
       $("volumeRange").addEventListener("input", (event) => setVolume(event.target.value));
-      $("fallbackPoster").addEventListener("error", () => $("artworkFallback").classList.add("poster-error"));
+      document.querySelectorAll(".fallback-poster").forEach((fallbackPoster) => fallbackPoster.addEventListener("error", (event) => {
+        const poster = event.currentTarget;
+        poster.hidden = true;
+        poster.closest(".artwork-fallback").classList.add("poster-error");
+      }));
       $("volumePop").addEventListener("click", (event) => event.stopPropagation());
       document.addEventListener("click", () => {
         $("volumePop").classList.remove("open");
@@ -1241,13 +1452,22 @@
         if (isMaster && currentStreamUrl && audio.paused) audio.play().catch(() => {});
         acquireWakeLock();
       }, { once: true });
-      document.addEventListener("visibilitychange", acquireWakeLock);
+      document.addEventListener("visibilitychange", () => {
+        acquireWakeLock();
+        if (!document.hidden && !animationFrame) {
+          backgroundLastFrame = performance.now();
+          animationFrame = requestAnimationFrame(drawBackground);
+        }
+      });
       window.addEventListener("resize", resizeLayout);
       window.addEventListener("resize", updateMetadataMarquees);
       window.addEventListener("orientationchange", resizeLayout);
-      setInterval(renderProgress, 250);
+      setInterval(() => {
+        if (currentSession && (currentSession.state === "playing" || currentSession.state === "paused")) renderProgress();
+      }, 250);
 
       resizeLayout();
+      configureBackgroundQuality(detectBackgroundQuality());
       loadVolume();
       refreshIcons();
       renderFullscreen();

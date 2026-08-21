@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Callable
+from typing import Callable, Literal
 
 import av
 from Crypto.Cipher import AES
@@ -163,6 +163,10 @@ class AirPlayServer:
         self._last_volume_db: float = -15.0  # 默认音量
         self._client_name: str = ""  # 连接的客户端设备名称
         self._is_playing: bool = False # 是否正在播放
+        self._session_state: Literal["idle", "playing", "paused", "closing"] = "idle"
+        self._session_token: str | None = None
+        self._business_session_started = False
+        self._state_lock = threading.RLock()
         self._metadata: dict = {}  # 歌曲元数据
         self._artwork: str | None = None  # 歌曲封面 (Base64)
         self._duration_ms: int | None = None
@@ -199,8 +203,11 @@ class AirPlayServer:
 
     @property
     def is_playing(self) -> bool:
-        """是否正在播放"""
-        return self._is_playing
+        return self._session_state == "playing"
+
+    @property
+    def session_state(self) -> str:
+        return self._session_state
 
     @property
     def client_name(self) -> str:
@@ -314,6 +321,68 @@ class AirPlayServer:
         except Exception as e:
             log.error(f"[AirPlay] on_play_stop error: {e}")
 
+    def _new_connection_token(self) -> str:
+        return uuid.uuid4().hex
+
+    def _pause_session(self, token: str | None = None):
+        with self._state_lock:
+            if token and self._session_token and token != self._session_token:
+                return
+            if self._session_state == "paused":
+                return
+            self._session_state = "paused"
+            self._is_playing = False
+        self._stream_server.stop_streaming()
+        if self.on_play_pause:
+            try:
+                self.on_play_pause()
+            except Exception:
+                log.debug("[AirPlay] 暂停回调失败", exc_info=True)
+
+    def _resume_session(self, token: str | None = None):
+        with self._state_lock:
+            if token and self._session_token and token != self._session_token:
+                return
+            was_paused = self._session_state == "paused"
+            self._session_state = "playing"
+            self._is_playing = True
+        self._stream_server.start_streaming()
+        if was_paused and self.on_play_resume:
+            try:
+                self.on_play_resume()
+            except Exception:
+                log.debug("[AirPlay] 恢复回调失败", exc_info=True)
+
+    def _finalize_stop(self, token: str | None = None, reason: str = "") -> bool:
+        with self._state_lock:
+            if token and self._session_token and token != self._session_token:
+                return False
+            had_session = self._business_session_started or self._session_state != "idle"
+            self._session_state = "closing"
+            self._is_playing = False
+            self._client_name = ""
+            self._metadata = {}
+            self._artwork = None
+            self._duration_ms = None
+            self._progress_position_ms = None
+            self._business_session_started = False
+            self._session_token = None
+            self._session_state = "idle"
+        self._stream_server.stop_streaming()
+        if had_session:
+            log.info("[AirPlay] 业务会话结束: %s", reason)
+            self._safe_call_on_play_stop()
+        return had_session
+
+    def _set_player_state(self, state: str, token: str | None = None):
+        value = state.strip().lower()
+        if value == "playing":
+            self._resume_session(token)
+        elif value == "paused":
+            self._pause_session(token)
+        elif value == "stopped":
+            self._finalize_stop(token, "dacp.playerstate=Stopped")
+
     def _handle_rtsp_client(self, sock: socket.socket, addr: tuple):
         """处理 RTSP 客户端连接"""
         log.info(f"[AirPlay] 客户端连接: {addr}")
@@ -322,45 +391,43 @@ class AirPlayServer:
         rtp_thread = None
         control_socket = None
         timing_socket = None
-        teardown_done = False  # 避免 TEARDOWN 和 finally 双重触发回调
+        connection_token = self._new_connection_token()
+        pending = b""
 
         # 设置客户端 socket 超时，防止无限阻塞导致线程卡死
         sock.settimeout(30.0)
 
         try:
             while self._running:
-                # 读取 RTSP 请求头
-                data = b""
-                while b"\r\n\r\n" not in data:
+                request = None
+                while request is None:
+                    header_end = pending.find(b"\r\n\r\n")
+                    if header_end >= 0:
+                        raw_header = pending[:header_end].decode("utf-8", errors="replace")
+                        lines = raw_header.split("\r\n")
+                        headers = {}
+                        for line in lines[1:]:
+                            if ":" in line:
+                                key, value = line.split(":", 1)
+                                headers[key.strip()] = value.strip()
+                        try:
+                            content_length = int(headers.get("Content-Length", "0") or "0")
+                        except ValueError:
+                            content_length = 0
+                        request_end = header_end + 4 + max(0, content_length)
+                        if len(pending) >= request_end:
+                            parts = lines[0].split()
+                            if len(parts) >= 3:
+                                request = (parts[0], parts[1], parts[2], headers, pending[header_end + 4:request_end])
+                                pending = pending[request_end:]
+                                break
                     chunk = sock.recv(4096)
                     if not chunk:
                         log.info(f"[AirPlay] 客户端关闭连接: {addr}")
                         return
-                    data += chunk
+                    pending += chunk
 
-                header_end = data.find(b"\r\n\r\n")
-                header_lines = data[:header_end].decode("utf-8", errors="replace").split("\r\n")
-                body = data[header_end + 4:]
-
-                if not header_lines:
-                    log.warning(f"[AirPlay] RTSP 空请求头")
-                    continue
-
-                request_line = header_lines[0]
-                parts = request_line.split()
-                if len(parts) < 3:
-                    log.warning(f"[AirPlay] RTSP 无效请求行: {request_line}")
-                    continue
-
-                method = parts[0]
-                path = parts[1]
-                protocol = parts[2]
-
-                headers = {}
-                for line in header_lines[1:]:
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        headers[key.strip()] = value.strip()
+                method, path, protocol, headers, body = request
 
                 # 记录客户端名称 (通常在 X-Apple-Device-Name 或 User-Agent)
                 if "X-Apple-Device-Name" in headers:
@@ -369,17 +436,6 @@ class AirPlayServer:
                     ua = headers["User-Agent"]
                     if "/" in ua:
                         self._client_name = ua.split("/")[0]
-
-                # 如果有 Content-Length，继续读取请求体
-                content_length = int(headers.get("Content-Length", 0))
-                if content_length > 0:
-                    while len(body) < content_length:
-                        chunk = sock.recv(4096)
-                        if not chunk:
-                            log.info(f"[AirPlay] 客户端关闭连接: {addr}")
-                            return
-                        body += chunk
-                    body = body[:content_length]
 
                 cseq = headers.get("CSeq", "0")
                 if method != "OPTIONS":
@@ -414,14 +470,19 @@ class AirPlayServer:
                     self._send_rtsp_response(sock, 200, cseq, response_headers)
 
                 elif method == "ANNOUNCE":
-                    self._is_playing = True
+                    with self._state_lock:
+                        replace_old = self._business_session_started and self._session_state != "paused"
+                    if replace_old:
+                        self._finalize_stop(self._session_token, "new ANNOUNCE replaced active session")
+                    with self._state_lock:
+                        self._session_token = connection_token
                     self._handle_announce(sock, headers, body, cseq)
 
                 elif method == "SETUP":
                     session_active, rtp_socket, control_socket, timing_socket = self._handle_setup(sock, headers, cseq)
 
                 elif method == "RECORD":
-                    self._handle_record(sock, cseq)
+                    self._handle_record(sock, cseq, connection_token)
                     # 启动 RTP 接收线程
                     if rtp_socket and not rtp_thread:
                         rtp_thread = threading.Thread(
@@ -432,36 +493,20 @@ class AirPlayServer:
                         rtp_thread.start()
 
                 elif method == "PAUSE":
-                    self._stream_server.stop_streaming()
-                    if self.on_play_pause:
-                        try:
-                            self.on_play_pause()
-                        except Exception:
-                            log.debug("[AirPlay] 暂停回调失败", exc_info=True)
+                    self._pause_session(connection_token)
                     self._send_rtsp_response(sock, 200, cseq)
 
                 elif method == "TEARDOWN":
-                    self._is_playing = False
-                    self._client_name = ""
-                    self._metadata = {}
-                    self._artwork = None
-                    self._duration_ms = None
-                    self._progress_position_ms = None
-                    self._stream_server.stop_streaming()
-                    teardown_done = True
-                    self._safe_call_on_play_stop()
+                    if self._session_state == "paused":
+                        log.info("[AirPlay] paused 后 TEARDOWN：仅关闭 RTSP 连接，保留业务会话")
+                    else:
+                        self._finalize_stop(connection_token, "RTSP TEARDOWN")
                     self._send_rtsp_response(sock, 200, cseq)
                     break
 
-                elif method == "FLUSH":
+                elif method in ("FLUSH", "FLUSHBUFFERED"):
                     log.info("[AirPlay] RTSP FLUSH: 清空音频缓冲区")
-                    # 仅清空队列，不停止流服务器，避免断开客户端
-                    self._stream_server.start_streaming()
-                    if self.on_play_resume:
-                        try:
-                            self.on_play_resume()
-                        except Exception:
-                            log.debug("[AirPlay] 恢复回调失败", exc_info=True)
+                    self._resume_session(connection_token)
                     self._send_rtsp_response(sock, 200, cseq)
 
                 elif method == "GET_PARAMETER":
@@ -496,6 +541,8 @@ class AirPlayServer:
                                     }
                                     if key in mapping:
                                         new_meta[mapping[key]] = val
+                                    elif key == "dacp.playerstate":
+                                        self._set_player_state(val, connection_token)
                                     elif key == "daap.songtime":
                                         try:
                                             self._duration_ms = max(0, int(val))
@@ -516,10 +563,13 @@ class AirPlayServer:
                     elif content_type.startswith("image/"):
                         # 解析封面图片
                         try:
-                            import base64
-                            img_b64 = base64.b64encode(body).decode("utf-8")
-                            self._artwork = f"data:{content_type};base64,{img_b64}"
-                            log.info(f"[Audio] 封面更新: {len(body)} 字节")
+                            if content_type.lower() == "image/none" or not body:
+                                self._artwork = None
+                                log.info("[Audio] 当前歌曲无封面")
+                            else:
+                                img_b64 = base64.b64encode(body).decode("utf-8")
+                                self._artwork = f"data:{content_type};base64,{img_b64}"
+                                log.info(f"[Audio] 封面更新: {len(body)} 字节")
                             self._notify_metadata_change()
                         except Exception as e:
                             log.error(f"[Audio] 处理封面失败: {e}")
@@ -553,6 +603,14 @@ class AirPlayServer:
                 elif method == "SET_VOLUME_NOTIFICATION":
                     self._send_rtsp_response(sock, 200, cseq)
 
+                elif method == "SETMAGICCOOKIE":
+                    if body and self._codec_context is not None:
+                        try:
+                            self._codec_context.extradata = body
+                        except Exception:
+                            log.debug("[AirPlay] SETMAGICCOOKIE 应用失败", exc_info=True)
+                    self._send_rtsp_response(sock, 200, cseq)
+
                 elif method == "POST" and path == "/fp-setup":
                     self._handle_fp_setup(sock, body, cseq)
 
@@ -562,20 +620,13 @@ class AirPlayServer:
 
                 else:
                     log.info(f"[AirPlay] 未处理的 RTSP 方法: {method} {path}")
-                    self._send_rtsp_response(sock, 200, cseq)
+                    self._send_rtsp_response(sock, 501, cseq)
 
         except socket.timeout:
             log.warning(f"[AirPlay] RTSP 客户端超时: {addr}")
         except Exception as e:
             log.error(f"[AirPlay] RTSP handler error: {e}")
         finally:
-            # 无论正常 TEARDOWN 还是异常断开，都要重置播放状态
-            self._is_playing = False
-            self._client_name = ""
-            self._metadata = {}
-            self._artwork = None
-            self._duration_ms = None
-            self._progress_position_ms = None
             # 关闭所有 socket（RTP、RTCP control、timing）
             for s in (rtp_socket, control_socket, timing_socket):
                 if s:
@@ -585,9 +636,11 @@ class AirPlayServer:
                         pass
             sock.close()
             log.info(f"[AirPlay] 客户端断开: {addr}")
-            # 异常断开时触发 on_play_stop 回调（TEARDOWN 已触发过则跳过）
-            if not teardown_done:
-                self._safe_call_on_play_stop()
+            with self._state_lock:
+                current = connection_token == self._session_token
+                paused = self._session_state == "paused"
+            if current and not paused:
+                self._finalize_stop(connection_token, "RTSP connection closed")
 
     def _handle_fp_setup(self, sock: socket.socket, body: bytes, cseq: str):
         """处理 FairPlay 认证 (POST /fp-setup)
@@ -931,15 +984,23 @@ class AirPlayServer:
             rtcp_socket.close()
             log.info("[AirPlay] RTCP 线程已停止")
 
-    def _handle_record(self, sock: socket.socket, cseq: str):
+    def _handle_record(self, sock: socket.socket, cseq: str, token: str | None = None):
         """处理 RECORD 请求 - 开始播放"""
-        self._stream_server.start_streaming()
+        with self._state_lock:
+            if token:
+                self._session_token = token
+            was_started = self._business_session_started
+            was_paused = self._session_state == "paused"
+            self._business_session_started = True
+        self._resume_session(token)
 
-        if self.on_play_start:
+        if not was_started and self.on_play_start:
             try:
                 self.on_play_start(self._stream_server.stream_url)
             except Exception as e:
                 log.error(f"[AirPlay] on_play_start error: {e}")
+        elif was_paused:
+            log.info("[AirPlay] RECORD 恢复已有业务会话")
 
         self._send_rtsp_response(sock, 200, cseq, {
             "Audio-Latency": "0",

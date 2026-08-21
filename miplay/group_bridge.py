@@ -120,6 +120,7 @@ class GroupBridge:
         self._poll_task: asyncio.Task | None = None
         self._play_grace_until = 0.0
         self._session_audio_id: str | None = None
+        self._metadata_track_key = ""
 
     @property
     def device_name(self) -> str:
@@ -182,7 +183,13 @@ class GroupBridge:
         if not self.audio_hub:
             return
         payload = dict(metadata)
-        payload["artwork"] = artwork or ""
+        track_key = "\x00".join(str(metadata.get(key) or "") for key in ("title", "artist", "album"))
+        # AirPlay 会重复发送 DMAP 元数据；这类更新没有封面字段时不能
+        # 把已经加载的封面覆盖成空字符串。只有新曲目或明确的图片事件
+        # 才更新 artwork。
+        if artwork is not None or track_key != self._metadata_track_key:
+            payload["artwork"] = artwork or ""
+        self._metadata_track_key = track_key
         self.audio_hub.update_session_metadata(payload)
 
     def _on_progress_change(self, position_ms: int, duration_ms: int | None):

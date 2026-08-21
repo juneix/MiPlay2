@@ -60,7 +60,6 @@ class AirPlayMDNS:
 
             # 构建设备 ID (去掉冒号的 MAC 地址格式，用于 RAOP 服务名)
             device_id_clean = self.device_id.replace(":", "")
-
             # ===== AirPlay 服务 (_airplay._tcp) =====
             # 这是 AirPlay 主服务，iOS 首先会查找这个服务
             # AirPlay 1 features for audio & metadata (AirPort Express)
@@ -119,6 +118,7 @@ class AirPlayMDNS:
                 b"ch": b"2",
                 b"cn": b"0,1,2,3",  # 支持 PCM, ALAC, AAC, AAC-ELD
                 b"et": b"0,1",       # 加密类型: none, RSA
+                b"ek": b"1",         # 支持 RSA encrypted AES key
                 b"sv": b"false",
                 b"da": b"true",
                 b"sr": b"44100",
@@ -143,7 +143,8 @@ class AirPlayMDNS:
                 server=f"{self.hostname}.local.",
             )
 
-            # 注册 RAOP 纯音频 AirPlay 服务
+            # 默认 AirPlay 1 音频接收端以 RAOP 为唯一发现入口；避免额外
+            # 广播一个能力不完整的 _airplay 服务干扰纯 RAOP 客户端。
             registered = False
             for attempt in range(2):
                 if not self._running:
